@@ -1,7 +1,10 @@
+using System;
+using Unity.VisualScripting;
 using UnityEngine;
 using UnityEngine.AI;
 using UnityUtils;
 using Utilities;
+using Random = UnityEngine.Random;
 
 namespace Building_Blocks
 {
@@ -44,6 +47,9 @@ namespace Building_Blocks
         public void Update(float deltaTime) => _timer.Tick(deltaTime);
     }
     
+    /// <summary>
+    /// Move to a random location in the navmesh within the wander radius
+    /// </summary>
     public class WanderStrategy : IActionStrategy
     {
         private readonly NavMeshAgent _agent;
@@ -72,5 +78,26 @@ namespace Building_Blocks
                 return;
             }
         }
+    }
+
+    /// <summary>
+    /// Move to a specific location given by a sensor
+    /// </summary>
+    public class MoveStrategy : IActionStrategy
+    {
+        private readonly NavMeshAgent _agent;
+        private readonly Func<Vector3> _destination;
+        
+        public bool CanPerform => !Complete;
+        public bool Complete => _agent.remainingDistance <= 2f && !_agent.pathPending;
+        public MoveStrategy(NavMeshAgent navMeshAgent, Func<Vector3> func)
+        {
+            _agent = navMeshAgent;
+            _destination = func;
+        }
+        
+        public void Start() => _agent.SetDestination(_destination());
+        public void Stop() => _agent.ResetPath();
+
     }
 }

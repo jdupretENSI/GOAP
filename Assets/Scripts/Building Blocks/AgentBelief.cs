@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Agents;
 using UnityEngine;
 
 namespace Building_Blocks
@@ -28,8 +29,8 @@ namespace Building_Blocks
         public void AddSensorBelief(string key, Sensor sensor)
         {
             _beliefs.Add(key, new AgentBelief.Builder(key)
-                .WithCondition(() => sensor.IsTragetInRange)
-                .WithLocation(() => sensor.TargetPostion)
+                .WithCondition(() => sensor.IsTargetInRange)
+                .WithLocation(() => sensor.TargetPosition)
                 .Build());
         }
 
@@ -54,8 +55,8 @@ namespace Building_Blocks
                 .WithLocation(() => locationCondition)
                 .Build());
         }
-    
-        bool InRangeOf(Vector3 pos, float range) => Vector3.Distance(_goapAgent.transform.position, pos) < range;
+
+        private bool InRangeOf(Vector3 pos, float range) => Vector3.Distance(_goapAgent.transform.position, pos) < range;
     }
 
     public class AgentBelief

@@ -14,16 +14,16 @@ namespace Building_Blocks
         [SerializeField] private float _detectionRadius;
         // Timer to reevaluate what is inside the sensor
         [SerializeField] private float _timerInterval;
-        
-        SphereCollider _sphereCollider;
+
+        private SphereCollider _sphereCollider;
         
         public event Action OnTargetChanged = delegate { };
 
-        public Vector3 TargetPostion => _target ? _target.transform.position : Vector3.zero;
-        public bool IsTragetInRange => TargetPostion != Vector3.zero;
+        public Vector3 TargetPosition => _target ? _target.transform.position : Vector3.zero;
+        public bool IsTargetInRange => TargetPosition != Vector3.zero;
         
         private GameObject _target;
-        private Vector3 _lastKnownTragetPosition;
+        private Vector3 _lastKnownTargetPosition;
         private CountdownTimer _timer;
 
         private void Awake()
@@ -54,10 +54,10 @@ namespace Building_Blocks
         {
             _target =  target;
 
-            if (!IsTragetInRange ||
-                (_lastKnownTragetPosition == TargetPostion && _lastKnownTragetPosition == Vector3.zero)) return;
+            if (!IsTargetInRange ||
+                (_lastKnownTargetPosition == TargetPosition && _lastKnownTargetPosition == Vector3.zero)) return;
             
-            _lastKnownTragetPosition = TargetPostion;
+            _lastKnownTargetPosition = TargetPosition;
             OnTargetChanged?.Invoke();
         }
 
@@ -77,7 +77,7 @@ namespace Building_Blocks
 
         private void OnDrawGizmos()
         {
-            Gizmos.color = IsTragetInRange ? Color.green : Color.red;
+            Gizmos.color = IsTargetInRange ? Color.green : Color.red;
             Gizmos.DrawWireSphere(transform.position, _detectionRadius);
         }
     }
