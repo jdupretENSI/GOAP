@@ -46,47 +46,51 @@ public class GoapPlanner : IGoapPlanner
         return null;
     }
 
-    bool FindPath(Node parent, HashSet<AgentAction> actions)
-    {
-        foreach (AgentAction action in actions)
-        {
+    bool FindPath(Node parent, HashSet<AgentAction> actions) {
+        // Order actions by cost, ascending
+        IOrderedEnumerable<AgentAction> orderedActions = actions.OrderBy(a => a.Cost);
+        
+        foreach (AgentAction action in orderedActions) {
             HashSet<AgentBelief> requiredEffects = parent.RequiredEffects;
             
             // Remove any effects that evaluate to true, there is no action to take
             requiredEffects.RemoveWhere(b => b.Evaluate());
             
-            // If there are no required effects to fufill, we have a plan
-            if (requiredEffects.Count == 0) return true;
-            
-            if (action.Effects.Any(requiredEffects.Contains))
-            {
+            // If there are no required effects to fulfill, we have a plan
+            if (requiredEffects.Count == 0) {
+                return true;
+            }
+
+            if (action.Effects.Any(requiredEffects.Contains)) {
                 HashSet<AgentBelief> newRequiredEffects = new HashSet<AgentBelief>(requiredEffects);
                 newRequiredEffects.ExceptWith(action.Effects);
-                newRequiredEffects.UnionWith(action.Effects);
+                newRequiredEffects.UnionWith(action.Preconditions);
                 
                 HashSet<AgentAction> newAvailableActions = new HashSet<AgentAction>(actions);
                 newAvailableActions.Remove(action);
-
+                
                 Node newNode = new Node(parent, action, newRequiredEffects, parent.Cost + action.Cost);
                 
                 // Explore the new node recursively
-                if (FindPath(newNode, newAvailableActions))
-                {
+                if (FindPath(newNode, newAvailableActions)) {
                     parent.Leaves.Add(newNode);
                     newRequiredEffects.ExceptWith(newNode.Action.Preconditions);
                 }
                 
                 // If all effects at this depth have been satisfied, return true
-                if (newRequiredEffects.Count == 0)
-                {
+                if (newRequiredEffects.Count == 0) {
                     return true;
                 }
             }
         }
-        return false;
+        
+        return parent.Leaves.Count > 0;
     }
 }
 
+/// <summary>
+/// Node graph of actions
+/// </summary>
 public class Node
 {
     public Node Parent { get; }
@@ -107,6 +111,9 @@ public class Node
     }
 }
 
+/// <summary>
+/// Struct for plan storage
+/// </summary>
 public class ActionPlan
 {
     public AgentGoal AgentGoal { get; }

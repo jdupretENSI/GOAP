@@ -31,15 +31,15 @@ public class GoapAgent : MonoBehaviour {
     private Vector3 _destination;
 
     private AgentGoal _lastGoal;
-    public AgentGoal CurrentGoal;
-    public ActionPlan ActionPlan;
-    public AgentAction CurrentAction;
-    
-    public Dictionary<string, AgentBelief> Beliefs;
+    private AgentGoal _currentGoal;
+    private ActionPlan _actionPlan;
+    private AgentAction _currentAction;
+
+    private Dictionary<string, AgentBelief> _beliefs;
     public HashSet<AgentAction> Actions;
-    public HashSet<AgentGoal> Goals;
+    private HashSet<AgentGoal> _goals;
     
-    [Inject] private GoapFactory _gFactory;
+    //[Inject] private GoapFactory _gFactory;
     private IGoapPlanner _gPlanner;
 
     private void Awake() {
@@ -47,7 +47,7 @@ public class GoapAgent : MonoBehaviour {
         _rb = GetComponent<Rigidbody>();
         _rb.freezeRotation = true;
         
-        _gPlanner = _gFactory.CreatePlanner();
+        _gPlanner = new GoapPlanner();
     }
 
     private void Start() {
@@ -58,26 +58,26 @@ public class GoapAgent : MonoBehaviour {
     }
 
     private void SetupBeliefs() {
-        Beliefs = new Dictionary<string, AgentBelief>();
-        BeliefFactory factory = new BeliefFactory(this, Beliefs);
+        _beliefs = new Dictionary<string, AgentBelief>();
+        BeliefFactory factory = new BeliefFactory(this, _beliefs);
         
         factory.AddBelief("Nothing", () => false);
         
         factory.AddBelief("AgentIdle", () => !_navMeshAgent.hasPath);
         factory.AddBelief("AgentMoving", () => _navMeshAgent.hasPath);
-        factory.AddBelief("AgentHealthLow", () => Health < 30);
-        factory.AddBelief("AgentIsHealthy", () => Health >= 50);
-        factory.AddBelief("AgentStaminaLow", () => Stamina < 10);
-        factory.AddBelief("AgentIsRested", () => Stamina >= 50);
-        
-        factory.AddLocationBelief("AgentAtDoorOne", 3f, _doorOnePosition);
-        factory.AddLocationBelief("AgentAtDoorTwo", 3f, _doorTwoPosition);
-        factory.AddLocationBelief("AgentAtRestingPosition", 3f, _restingPosition);
-        factory.AddLocationBelief("AgentAtFoodShack", 3f, _foodShack);
-        
-        factory.AddSensorBelief("PlayerInChaseRange", _chaseSensor);
-        factory.AddSensorBelief("PlayerInAttackRange", _attackSensor);
-        factory.AddBelief("AttackingPlayer", () => false); // Player can always be attacked, this will never become true
+        // factory.AddBelief("AgentHealthLow", () => Health < 30);
+        // factory.AddBelief("AgentIsHealthy", () => Health >= 50);
+        // factory.AddBelief("AgentStaminaLow", () => Stamina < 10);
+        // factory.AddBelief("AgentIsRested", () => Stamina >= 50);
+        //
+        // factory.AddLocationBelief("AgentAtDoorOne", 3f, _doorOnePosition);
+        // factory.AddLocationBelief("AgentAtDoorTwo", 3f, _doorTwoPosition);
+        // factory.AddLocationBelief("AgentAtRestingPosition", 3f, _restingPosition);
+        // factory.AddLocationBelief("AgentAtFoodShack", 3f, _foodShack);
+        //
+        // factory.AddSensorBelief("PlayerInChaseRange", _chaseSensor);
+        // factory.AddSensorBelief("PlayerInAttackRange", _attackSensor);
+        // factory.AddBelief("AttackingPlayer", () => false); // Player can always be attacked, this will never become true
     }
 
     private void SetupActions() {
@@ -85,93 +85,93 @@ public class GoapAgent : MonoBehaviour {
         
         Actions.Add(new AgentAction.Builder("Relax")
             .WithStrategy(new IdleStrategy(5))
-            .AddEffect(Beliefs["Nothing"])
+            .AddEffect(_beliefs["Nothing"])
             .Build());
         
         Actions.Add(new AgentAction.Builder("Wander Around")
             .WithStrategy(new WanderStrategy(_navMeshAgent, 10))
-            .AddEffect(Beliefs["AgentMoving"])
+            .AddEffect(_beliefs["AgentMoving"])
             .Build());
 
-        Actions.Add(new AgentAction.Builder("MoveToEatingPosition")
-            .WithStrategy(new MoveStrategy(_navMeshAgent, () => _foodShack.position))
-            .AddEffect(Beliefs["AgentAtFoodShack"])
-            .Build());
-        
-        Actions.Add(new AgentAction.Builder("Eat")
-            .WithStrategy(new IdleStrategy(5))  // Later replace with a Command
-            .AddPrecondition(Beliefs["AgentAtFoodShack"])
-            .AddEffect(Beliefs["AgentIsHealthy"])
-            .Build());
-
-        Actions.Add(new AgentAction.Builder("MoveToDoorOne")
-            .WithStrategy(new MoveStrategy(_navMeshAgent, () => _doorOnePosition.position))
-            .AddEffect(Beliefs["AgentAtDoorOne"])
-            .Build());
-
-        Actions.Add(new AgentAction.Builder("MoveToDoorTwo")
-            .WithStrategy(new MoveStrategy(_navMeshAgent, () => _doorTwoPosition.position))
-            .AddEffect(Beliefs["AgentAtDoorTwo"])
-            .Build());
-
-        Actions.Add(new AgentAction.Builder("MoveFromDoorOneToRestArea")
-            .WithCost(2)
-            .WithStrategy(new MoveStrategy(_navMeshAgent, () => _restingPosition.position))
-            .AddPrecondition(Beliefs["AgentAtDoorOne"])
-            .AddEffect(Beliefs["AgentAtRestingPosition"])
-            .Build());
-
-        Actions.Add(new AgentAction.Builder("MoveFromDoorTwoRestArea")
-            .WithStrategy(new MoveStrategy(_navMeshAgent, () => _restingPosition.position))
-            .AddPrecondition(Beliefs["AgentAtDoorTwo"])
-            .AddEffect(Beliefs["AgentAtRestingPosition"])
-            .Build());
-
-        Actions.Add(new AgentAction.Builder("Rest")
-            .WithStrategy(new IdleStrategy(5))
-            .AddPrecondition(Beliefs["AgentAtRestingPosition"])
-            .AddEffect(Beliefs["AgentIsRested"])
-            .Build());
-
-        Actions.Add(new AgentAction.Builder("ChasePlayer")
-            .WithStrategy(new MoveStrategy(_navMeshAgent, () => Beliefs["PlayerInChaseRange"].Location))
-            .AddPrecondition(Beliefs["PlayerInChaseRange"])
-            .AddEffect(Beliefs["PlayerInAttackRange"])
-            .Build());
-
-        Actions.Add(new AgentAction.Builder("AttackPlayer")
-            .AddPrecondition(Beliefs["PlayerInAttackRange"])
-            .AddEffect(Beliefs["AttackingPlayer"])
-            .Build());
+        // Actions.Add(new AgentAction.Builder("MoveToEatingPosition")
+        //     .WithStrategy(new MoveStrategy(_navMeshAgent, () => _foodShack.position))
+        //     .AddEffect(Beliefs["AgentAtFoodShack"])
+        //     .Build());
+        //
+        // Actions.Add(new AgentAction.Builder("Eat")
+        //     .WithStrategy(new IdleStrategy(5))  // Later replace with a Command
+        //     .AddPrecondition(Beliefs["AgentAtFoodShack"])
+        //     .AddEffect(Beliefs["AgentIsHealthy"])
+        //     .Build());
+        //
+        // Actions.Add(new AgentAction.Builder("MoveToDoorOne")
+        //     .WithStrategy(new MoveStrategy(_navMeshAgent, () => _doorOnePosition.position))
+        //     .AddEffect(Beliefs["AgentAtDoorOne"])
+        //     .Build());
+        //
+        // Actions.Add(new AgentAction.Builder("MoveToDoorTwo")
+        //     .WithStrategy(new MoveStrategy(_navMeshAgent, () => _doorTwoPosition.position))
+        //     .AddEffect(Beliefs["AgentAtDoorTwo"])
+        //     .Build());
+        //
+        // Actions.Add(new AgentAction.Builder("MoveFromDoorOneToRestArea")
+        //     .WithCost(2)
+        //     .WithStrategy(new MoveStrategy(_navMeshAgent, () => _restingPosition.position))
+        //     .AddPrecondition(Beliefs["AgentAtDoorOne"])
+        //     .AddEffect(Beliefs["AgentAtRestingPosition"])
+        //     .Build());
+        //
+        // Actions.Add(new AgentAction.Builder("MoveFromDoorTwoRestArea")
+        //     .WithStrategy(new MoveStrategy(_navMeshAgent, () => _restingPosition.position))
+        //     .AddPrecondition(Beliefs["AgentAtDoorTwo"])
+        //     .AddEffect(Beliefs["AgentAtRestingPosition"])
+        //     .Build());
+        //
+        // Actions.Add(new AgentAction.Builder("Rest")
+        //     .WithStrategy(new IdleStrategy(5))
+        //     .AddPrecondition(Beliefs["AgentAtRestingPosition"])
+        //     .AddEffect(Beliefs["AgentIsRested"])
+        //     .Build());
+        //
+        // Actions.Add(new AgentAction.Builder("ChasePlayer")
+        //     .WithStrategy(new MoveStrategy(_navMeshAgent, () => Beliefs["PlayerInChaseRange"].Location))
+        //     .AddPrecondition(Beliefs["PlayerInChaseRange"])
+        //     .AddEffect(Beliefs["PlayerInAttackRange"])
+        //     .Build());
+        //
+        // Actions.Add(new AgentAction.Builder("AttackPlayer")
+        //     .AddPrecondition(Beliefs["PlayerInAttackRange"])
+        //     .AddEffect(Beliefs["AttackingPlayer"])
+        //     .Build());
     }
 
     private void SetupGoals() {
-        Goals = new HashSet<AgentGoal>();
+        _goals = new HashSet<AgentGoal>();
         
-        Goals.Add(new AgentGoal.Builder("Chill Out")
+        _goals.Add(new AgentGoal.Builder("Chill Out")
             .WithPriority(1)
-            .WithDesiredEffect(Beliefs["Nothing"])
+            .WithDesiredEffect(_beliefs["Nothing"])
             .Build());
         
-        Goals.Add(new AgentGoal.Builder("Wander")
+        _goals.Add(new AgentGoal.Builder("Wander")
             .WithPriority(1)
-            .WithDesiredEffect(Beliefs["AgentMoving"])
+            .WithDesiredEffect(_beliefs["AgentMoving"])
             .Build());
         
-        Goals.Add(new AgentGoal.Builder("KeepHealthUp")
-            .WithPriority(2)
-            .WithDesiredEffect(Beliefs["AgentIsHealthy"])
-            .Build());
-
-        Goals.Add(new AgentGoal.Builder("KeepStaminaUp")
-            .WithPriority(2)
-            .WithDesiredEffect(Beliefs["AgentIsRested"])
-            .Build());
-        
-        Goals.Add(new AgentGoal.Builder("SeekAndDestroy")
-            .WithPriority(3)
-            .WithDesiredEffect(Beliefs["AttackingPlayer"])
-            .Build());
+        // Goals.Add(new AgentGoal.Builder("KeepHealthUp")
+        //     .WithPriority(2)
+        //     .WithDesiredEffect(Beliefs["AgentIsHealthy"])
+        //     .Build());
+        //
+        // Goals.Add(new AgentGoal.Builder("KeepStaminaUp")
+        //     .WithPriority(2)
+        //     .WithDesiredEffect(Beliefs["AgentIsRested"])
+        //     .Build());
+        //
+        // Goals.Add(new AgentGoal.Builder("SeekAndDestroy")
+        //     .WithPriority(3)
+        //     .WithDesiredEffect(Beliefs["AttackingPlayer"])
+        //     .Build());
     }
 
     private void SetupTimers() {
@@ -199,68 +199,70 @@ public class GoapAgent : MonoBehaviour {
     private void HandleTargetChanged() {
         Debug.Log("Target changed, clearing current action and goal");
         // Force the planner to re-evaluate the plan
-        CurrentAction = null;
-        CurrentGoal = null;
+        _currentAction = null;
+        _currentGoal = null;
     }
 
     private void Update() {
         _statsTimer.Tick(Time.deltaTime);
         
         // Update the plan and current action if there is one
-        if (CurrentAction == null) {
+        if (_currentAction == null) {
             Debug.Log("Calculating any potential new plan");
             CalculatePlan();
 
-            if (ActionPlan != null && ActionPlan.Actions.Count > 0) {
+            if (_actionPlan != null && _actionPlan.Actions.Count > 0) {
                 _navMeshAgent.ResetPath();
 
-                CurrentGoal = ActionPlan.AgentGoal;
-                Debug.Log($"Goal: {CurrentGoal.Name} with {ActionPlan.Actions.Count} actions in plan");
-                CurrentAction = ActionPlan.Actions.Pop();
-                Debug.Log($"Popped action: {CurrentAction.Name}");
+                _currentGoal = _actionPlan.AgentGoal;
+                Debug.Log($"Goal: {_currentGoal.Name} with {_actionPlan.Actions.Count} actions in plan");
+                
+                _currentAction = _actionPlan.Actions.Pop();
+                Debug.Log($"Popped action: {_currentAction.Name}");
+                
                 // Verify all precondition effects are true
-                if (CurrentAction.Preconditions.All(b => b.Evaluate())) {
-                    CurrentAction.Start();
+                if (_currentAction.Preconditions.All(b => b.Evaluate())) {
+                    _currentAction.Start();
                 } else {
                     Debug.Log("Preconditions not met, clearing current action and goal");
-                    CurrentAction = null;
-                    CurrentGoal = null;
+                    _currentAction = null;
+                    _currentGoal = null;
                 }
             }
         }
 
         // If we have a current action, execute it
-        if (ActionPlan != null && CurrentAction != null) {
-            CurrentAction.Update(Time.deltaTime);
+        if (_actionPlan != null && _currentAction != null) {
+            _currentAction.Update(Time.deltaTime);
 
-            if (CurrentAction.Complete) {
-                Debug.Log($"{CurrentAction.Name} complete");
-                CurrentAction.Stop();
-                CurrentAction = null;
+            if (_currentAction.Complete) {
+                Debug.Log($"{_currentAction.Name} complete");
+                _currentAction.Stop();
+                _currentAction = null;
 
-                if (ActionPlan.Actions.Count == 0) {
+                if (_actionPlan.Actions.Count == 0) {
                     Debug.Log("Plan complete");
-                    _lastGoal = CurrentGoal;
-                    CurrentGoal = null;
+                    _lastGoal = _currentGoal;
+                    _currentGoal = null;
                 }
             }
         }
     }
 
     private void CalculatePlan() {
-        var priorityLevel = CurrentGoal?.Priority ?? 0;
+        float priorityLevel = _currentGoal?.Priority ?? 0;
         
-        HashSet<AgentGoal> goalsToCheck = Goals;
+        HashSet<AgentGoal> goalsToCheck = _goals;
         
         // If we have a current goal, we only want to check goals with higher priority
-        if (CurrentGoal != null) {
+        if (_currentGoal != null) {
             Debug.Log("Current goal exists, checking goals with higher priority");
-            goalsToCheck = new HashSet<AgentGoal>(Goals.Where(g => g.Priority > priorityLevel));
+            goalsToCheck = new HashSet<AgentGoal>(_goals.Where(g => g.Priority > priorityLevel));
         }
         
-        var potentialPlan = _gPlanner.Plan(this, goalsToCheck, _lastGoal);
+        ActionPlan potentialPlan = _gPlanner.Plan(this, goalsToCheck, _lastGoal);
         if (potentialPlan != null) {
-            ActionPlan = potentialPlan;
+            _actionPlan = potentialPlan;
         }
     }
 }
