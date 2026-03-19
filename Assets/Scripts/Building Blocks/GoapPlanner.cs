@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Agents;
@@ -116,6 +117,7 @@ namespace Building_Blocks
     /// <summary>
     /// Struct for plan storage
     /// </summary>
+    [Serializable]
     public class ActionPlan
     {
         public AgentGoal AgentGoal { get; }

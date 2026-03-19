@@ -1,4 +1,5 @@
 using System;
+using Agents;
 using Unity.VisualScripting;
 using UnityEngine;
 using UnityEngine.AI;
@@ -99,5 +100,94 @@ namespace Building_Blocks
         public void Start() => _agent.SetDestination(_destination());
         public void Stop() => _agent.ResetPath();
 
+    }
+
+    public class RangedAttackStrategy : IActionStrategy
+    {
+        private readonly GoapAgent _agent;
+        private readonly float _attackDuration;
+        private float _timer;
+    
+        public bool CanPerform => true;
+        public bool Complete { get; private set; }
+
+        public RangedAttackStrategy(GoapAgent agent, float attackDuration = 1f)
+        {
+            _agent = agent;
+            _attackDuration = attackDuration;
+        }
+
+        public void Start()
+        {
+            _timer = 0;
+            Complete = false;
+        
+            // Perform the attack
+            _agent.RangedAttack();
+        }
+
+        public void Update(float deltaTime)
+        {
+            _timer += deltaTime;
+            if (_timer >= _attackDuration)
+            {
+                Complete = true;
+            }
+        }
+    }
+    
+    public class TakeAimStrategy : IActionStrategy
+    {
+        private readonly NavMeshAgent _agent;
+        private readonly Func<Vector3> _target;
+        private readonly float _aimTolerance;
+        private readonly float _rotationSpeed;
+    
+        public bool CanPerform => true;
+        public bool Complete { get; private set; }
+
+        public TakeAimStrategy(NavMeshAgent agent, Func<Vector3> target, 
+            float aimTolerance = 5f, float rotationSpeed = 360f)
+        {
+            _agent = agent;
+            _target = target;
+            _aimTolerance = aimTolerance;
+            _rotationSpeed = rotationSpeed;
+        }
+
+        public void Start()
+        {
+            // Stop movement while aiming
+            _agent.isStopped = true;
+        }
+
+        public void Update(float deltaTime)
+        {
+            Vector3 targetPosition = _target();
+            Vector3 directionToTarget = (targetPosition - _agent.transform.position).normalized;
+        
+            // Zero out the y component to prevent tilting
+            directionToTarget.y = 0;
+        
+            if (directionToTarget != Vector3.zero)
+            {
+                // Smoothly rotate towards target
+                Quaternion targetRotation = Quaternion.LookRotation(directionToTarget);
+                _agent.transform.rotation = Quaternion.RotateTowards(
+                    _agent.transform.rotation, 
+                    targetRotation, 
+                    _rotationSpeed * deltaTime
+                );
+            }
+        
+            // Check if we're facing the target within tolerance
+            float angleToTarget = Vector3.Angle(_agent.transform.forward, directionToTarget);
+            Complete = angleToTarget <= _aimTolerance;
+        }
+
+        public void Stop()
+        {
+            _agent.isStopped = false;
+        }
     }
 }

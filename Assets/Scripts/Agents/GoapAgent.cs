@@ -12,7 +12,6 @@ namespace Agents
         [Header("Sensors")] 
         [SerializeField] private Sensor _chaseSensor;
         [SerializeField] private Sensor _attackSensor;
-        [SerializeField] private Sensor _rangedAttackSensor;
 
         [Header("Known Locations")] 
         [SerializeField] private Transform _healingStation;
@@ -23,24 +22,26 @@ namespace Agents
     
         [Header("Stats")] 
         public float Health = 100;
-        public float Stamina = 100;
         public int Ammo = 10;
+        [SerializeField] private GameObject _projectile;
 
         private CountdownTimer _statsTimer;
 
         private GameObject _target;
         private Vector3 _destination;
 
-        private AgentGoal _lastGoal;
-        private AgentGoal _currentGoal;
-        private ActionPlan _actionPlan;
-        private AgentAction _currentAction;
+        [Header("Debug")]
+        [SerializeField] private StringAgentBelief _beliefsSerialized = new();
+        
+        [SerializeField] private AgentGoal _lastGoal;
+        [SerializeField] private AgentGoal _currentGoal;
+        [SerializeField] private ActionPlan _actionPlan;
+        [SerializeField] private AgentAction _currentAction;
 
         private Dictionary<string, AgentBelief> _beliefs;
         public HashSet<AgentAction> Actions;
         private HashSet<AgentGoal> _goals;
-    
-        //[Inject] private GoapFactory _gFactory;
+        
         private IGoapPlanner _gPlanner;
 
         private void Awake() {
@@ -72,17 +73,16 @@ namespace Agents
             
             factory.AddLocationBelief("AgentAtHealingStation", 3f, _healingStation);
             
-            factory.AddBelief("LowStamina", () => Stamina < 20);
-            factory.AddBelief("HighStamina", () => Stamina > 50);
-            
             factory.AddBelief("NoAmmo", () => Ammo <= 0);
-            factory.AddBelief("FullClip", () => Ammo >= 10);
+            factory.AddBelief("FullClip", () => Ammo >= 8);
             factory.AddLocationBelief("AgentAtAmmoStation", 3f, _ammoStation);
         
             factory.AddSensorBelief("PlayerInChaseRange", _chaseSensor);
             factory.AddSensorBelief("PlayerInAttackRange", _attackSensor);
-            factory.AddSensorBelief("PlayerInShootingRange", _rangedAttackSensor);
+            factory.AddSensorBelief("PlayerInShootingRange", _chaseSensor);
             factory.AddBelief("AttackingPlayer", () => false); // Player can always be attacked, this will never become true
+            factory.AddBelief("AimedAtPlayer", () => false); // Initially false
+            factory.AddBelief("FiringAtPlayer", () => false); // Initially false
         }
 
         private void SetupActions() {
@@ -101,13 +101,28 @@ namespace Agents
                 new AgentAction.Builder("ChasePlayer")
                     .WithStrategy(new MoveStrategy(_navMeshAgent, () => _beliefs["PlayerInChaseRange"].Location))
                     .AddPrecondition(_beliefs["PlayerInChaseRange"])
+                    .AddPrecondition(_beliefs["HighHealth"])
                     .AddEffect(_beliefs["PlayerInAttackRange"])
                     .Build(),
                 
-                new AgentAction.Builder("AttackPlayer")
+                new AgentAction.Builder("MeleeAttackPlayer")
                     .WithStrategy(new IdleStrategy(2))
                     .AddPrecondition(_beliefs["PlayerInAttackRange"])
+                    .AddPrecondition(_beliefs["HighHealth"])
                     .AddEffect(_beliefs["AttackingPlayer"])
+                    .Build(),
+                
+                new AgentAction.Builder("TakeAim")
+                    .WithStrategy(new TakeAimStrategy(_navMeshAgent, () => _beliefs["PlayerInChaseRange"].Location))
+                    .AddPrecondition(_beliefs["PlayerInChaseRange"])
+                    .AddPrecondition(_beliefs["FullClip"])
+                    .AddEffect(_beliefs["AimedAtPlayer"])
+                    .Build(),
+        
+                new AgentAction.Builder("RangedAttackPlayer")
+                    .WithStrategy(new RangedAttackStrategy(this))
+                    .AddPrecondition(_beliefs["AimedAtPlayer"])
+                    .AddEffect(_beliefs["FiringAtPlayer"])
                     .Build(),
                 
                 new AgentAction.Builder("MoveToHealingStation")
@@ -149,12 +164,17 @@ namespace Agents
                     .Build(),
                     
                 new AgentGoal.Builder("SeekAndDestroy")
-                    .WithPriority(3)
+                    .WithPriority(4)
                     .WithDesiredEffect(_beliefs["AttackingPlayer"])
                     .Build(),
                 
+                new AgentGoal.Builder("FireAtWill")
+                    .WithPriority(5)
+                    .WithDesiredEffect(_beliefs["FiringAtPlayer"])
+                    .Build(),
+                
                 new AgentGoal.Builder("KeepHealthHigh")
-                    .WithPriority(4)
+                    .WithPriority(6)
                     .WithDesiredEffect(_beliefs["HighHealth"])
                     .Build(),
                 
@@ -186,6 +206,8 @@ namespace Agents
         }
 
         private void Update() {
+            
+            UpdateBeliefs();
         
             // Update the plan and current action if there is one
             if (_currentAction == null) {
@@ -230,6 +252,16 @@ namespace Agents
             }
         }
 
+        private void UpdateBeliefs()
+        {
+            _beliefsSerialized.Clear();
+            
+            foreach (KeyValuePair<string, AgentBelief> keyVPair in _beliefs)
+            {
+                _beliefsSerialized.Add(keyVPair.Key, keyVPair.Value);
+            }
+        }
+
         private void CalculatePlan() {
             float priorityLevel = _currentGoal?.Priority ?? 0;
         
@@ -250,11 +282,25 @@ namespace Agents
         public void Heal()
         {
             Health += 10;
+            Health = Mathf.Clamp(Health, 0, 100);
         }
 
         public void Reload()
         {
             Ammo += 1;
+            Ammo = Mathf.Clamp(Ammo, 0, 10);
+        }
+        
+        public void RangedAttack()
+        {
+            if (Ammo <= 0) return;
+    
+            GameObject projectile = Instantiate(_projectile);
+            Rigidbody rb = projectile.GetComponent<Rigidbody>();
+            
+            rb.AddForce(this.transform.forward * 10f, ForceMode.Impulse);
+
+            Ammo--;
         }
     }
 }

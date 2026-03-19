@@ -1,8 +1,9 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 
 namespace Building_Blocks
 {
-    
+    [Serializable]
     public class AgentAction
     {
         private AgentAction(string name)
