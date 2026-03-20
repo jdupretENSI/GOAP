@@ -24,32 +24,32 @@ namespace Building_Blocks
                 .ToList();
 
             //TODO A* implementation
+            // Basically do a check on all the paths and keep only the shortest paths to go down
             // Currently this is a BFS
             foreach (AgentGoal goal in orderedGoals)
             {
-                Node goalNode = new Node(null, null, goal.DesiredEffects, 0);
+                Node goalNode = new(null, null, goal.DesiredEffects, 0);
 
-                if (FindPath(goalNode, agent.Actions))
-                {
-                    // If the goalNode has no leaves and no action to perform try a different goal
-                    if (goalNode.IsLeafDead) continue;
+                if (!FindPath(goalNode, agent.Actions)) continue;
                 
-                    Stack<AgentAction> actionStack = new Stack<AgentAction>();
-                    while (goalNode.Leaves.Count > 0)
-                    {
-                        Node cheapestLeaf = goalNode.Leaves.OrderBy(leaf => leaf.Cost).First();
-                        goalNode = cheapestLeaf;
-                        actionStack.Push(cheapestLeaf.Action);
-                    }
-
-                    return new ActionPlan(goal, actionStack, goalNode.Cost);
+                // If the goalNode has no leaves and no action to perform try a different goal
+                if (goalNode.IsLeafDead) continue;
+                
+                Stack<AgentAction> actionStack = new();
+                while (goalNode.Leaves.Count > 0)
+                {
+                    Node cheapestLeaf = goalNode.Leaves.OrderBy(leaf => leaf.Cost).First();
+                    goalNode = cheapestLeaf;
+                    actionStack.Push(cheapestLeaf.Action);
                 }
+
+                return new ActionPlan(goal, actionStack, goalNode.Cost);
             }
             Debug.LogWarning("No plan found");
             return null;
         }
 
-        bool FindPath(Node parent, HashSet<AgentAction> actions) {
+        private static bool FindPath(Node parent, HashSet<AgentAction> actions) {
             // Order actions by cost, ascending
             IOrderedEnumerable<AgentAction> orderedActions = actions.OrderBy(a => a.Cost);
         

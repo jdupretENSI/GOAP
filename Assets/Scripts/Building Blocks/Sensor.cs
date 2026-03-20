@@ -15,6 +15,7 @@ namespace Building_Blocks
         // Timer to reevaluate what is inside the sensor
         [SerializeField] private float _timerInterval;
 
+        public float DetectionRadius => _detectionRadius;
         private SphereCollider _sphereCollider;
         
         public event Action OnTargetChanged = delegate { };

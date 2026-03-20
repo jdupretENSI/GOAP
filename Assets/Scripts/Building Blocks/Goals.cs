@@ -4,7 +4,6 @@ using System.Collections.Generic;
 namespace Building_Blocks
 {
     // What do we want to achieve
-    [Serializable]
     public class AgentGoal
     {
         public string Name {get;}

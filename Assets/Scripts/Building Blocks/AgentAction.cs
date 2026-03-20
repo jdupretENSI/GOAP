@@ -38,8 +38,6 @@ namespace Building_Blocks
             {
                 effects.Evaluate();
             }
-            
-            
         }
         
         public void Stop() => _strategy.Stop();

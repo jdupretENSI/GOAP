@@ -58,8 +58,8 @@ namespace Building_Blocks
 
         private bool InRangeOf(Vector3 pos, float range) => Vector3.Distance(_goapAgent.transform.position, pos) < range;
     }
-
-    [Serializable]
+    
+    
     public class AgentBelief
     {
         private AgentBelief(string name)
@@ -72,7 +72,7 @@ namespace Building_Blocks
         /// </summary>
         public string Name { get; }
     
-        [SerializeField] private Func<bool> _condition = () => false;
+        private Func<bool> _condition = () => false;
         private Func<Vector3> _observedLocation =  () => Vector3.zero;
     
         /// <summary>

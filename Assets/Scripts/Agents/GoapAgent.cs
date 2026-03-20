@@ -7,6 +7,15 @@ using Utilities;
 
 namespace Agents
 {
+    [System.Serializable]
+    public class SerializableActionPlan
+    {
+        public string GoalName;
+        public int ActionCount;
+        public float TotalCost;
+        public List<string> ActionNames = new List<string>();
+    }
+    
     [RequireComponent(typeof(NavMeshAgent))]
     public class GoapAgent : MonoBehaviour {
         [Header("Sensors")] 
@@ -25,18 +34,21 @@ namespace Agents
         public int Ammo = 10;
         [SerializeField] private GameObject _projectile;
 
+        [Header("Debug")]
+        [SerializeField] private List<string> _activeBeliefs = new();
+        [SerializeField] private SerializableActionPlan _debugPlan;
+        [SerializeField] private string _currentActionName;
+        
         private CountdownTimer _statsTimer;
 
+        private RaycastHit _hit;
         private GameObject _target;
         private Vector3 _destination;
 
-        [Header("Debug")]
-        [SerializeField] private StringAgentBelief _beliefsSerialized = new();
-        
-        [SerializeField] private AgentGoal _lastGoal;
-        [SerializeField] private AgentGoal _currentGoal;
-        [SerializeField] private ActionPlan _actionPlan;
-        [SerializeField] private AgentAction _currentAction;
+        private AgentGoal _lastGoal;
+        private AgentGoal _currentGoal;
+        private ActionPlan _actionPlan;
+        private AgentAction _currentAction;
 
         private Dictionary<string, AgentBelief> _beliefs;
         public HashSet<AgentAction> Actions;
@@ -74,15 +86,14 @@ namespace Agents
             factory.AddLocationBelief("AgentAtHealingStation", 3f, _healingStation);
             
             factory.AddBelief("NoAmmo", () => Ammo <= 0);
-            factory.AddBelief("FullClip", () => Ammo >= 8);
+            factory.AddBelief("HasAmmo", () => Ammo >= 1);
             factory.AddLocationBelief("AgentAtAmmoStation", 3f, _ammoStation);
         
             factory.AddSensorBelief("PlayerInChaseRange", _chaseSensor);
             factory.AddSensorBelief("PlayerInAttackRange", _attackSensor);
             factory.AddSensorBelief("PlayerInShootingRange", _chaseSensor);
             factory.AddBelief("AttackingPlayer", () => false); // Player can always be attacked, this will never become true
-            factory.AddBelief("AimedAtPlayer", () => false); // Initially false
-            factory.AddBelief("FiringAtPlayer", () => false); // Initially false
+            factory.AddBelief("AimedAtPlayer", RaycastHitGameObject);
         }
 
         private void SetupActions() {
@@ -102,6 +113,7 @@ namespace Agents
                     .WithStrategy(new MoveStrategy(_navMeshAgent, () => _beliefs["PlayerInChaseRange"].Location))
                     .AddPrecondition(_beliefs["PlayerInChaseRange"])
                     .AddPrecondition(_beliefs["HighHealth"])
+                    .WithCost(2)
                     .AddEffect(_beliefs["PlayerInAttackRange"])
                     .Build(),
                 
@@ -115,14 +127,14 @@ namespace Agents
                 new AgentAction.Builder("TakeAim")
                     .WithStrategy(new TakeAimStrategy(_navMeshAgent, () => _beliefs["PlayerInChaseRange"].Location))
                     .AddPrecondition(_beliefs["PlayerInChaseRange"])
-                    .AddPrecondition(_beliefs["FullClip"])
                     .AddEffect(_beliefs["AimedAtPlayer"])
                     .Build(),
         
                 new AgentAction.Builder("RangedAttackPlayer")
                     .WithStrategy(new RangedAttackStrategy(this))
                     .AddPrecondition(_beliefs["AimedAtPlayer"])
-                    .AddEffect(_beliefs["FiringAtPlayer"])
+                    .AddPrecondition(_beliefs["HasAmmo"])
+                    .AddEffect(_beliefs["AttackingPlayer"])
                     .Build(),
                 
                 new AgentAction.Builder("MoveToHealingStation")
@@ -144,7 +156,7 @@ namespace Agents
                 new AgentAction.Builder("Reload")
                     .WithStrategy(new IdleStrategy(10)) // Wait for the station to heal you
                     .AddPrecondition(_beliefs["AgentAtAmmoStation"])
-                    .AddEffect(_beliefs["FullClip"])
+                    .AddEffect(_beliefs["HasAmmo"])
                     .Build(),
             
             };
@@ -163,24 +175,19 @@ namespace Agents
                     .WithDesiredEffect(_beliefs["AgentMoving"])
                     .Build(),
                     
-                new AgentGoal.Builder("SeekAndDestroy")
+                new AgentGoal.Builder("DestroyTarget")
                     .WithPriority(4)
                     .WithDesiredEffect(_beliefs["AttackingPlayer"])
                     .Build(),
                 
-                new AgentGoal.Builder("FireAtWill")
-                    .WithPriority(5)
-                    .WithDesiredEffect(_beliefs["FiringAtPlayer"])
-                    .Build(),
-                
                 new AgentGoal.Builder("KeepHealthHigh")
-                    .WithPriority(6)
+                    .WithPriority(5)
                     .WithDesiredEffect(_beliefs["HighHealth"])
                     .Build(),
                 
                 new AgentGoal.Builder("KeepAmmoHigh")
                     .WithPriority(3)
-                    .WithDesiredEffect(_beliefs["FullClip"])
+                    .WithDesiredEffect(_beliefs["HasAmmo"])
                     .Build(),
             };
         }
@@ -205,10 +212,11 @@ namespace Agents
             _currentGoal = null;
         }
 
-        private void Update() {
+        private void Update()
+        {
+            UpdateActiveBeliefs();
+            _currentActionName = _currentAction?.Name ?? "None";
             
-            UpdateBeliefs();
-        
             // Update the plan and current action if there is one
             if (_currentAction == null) {
                 Debug.Log("Calculating any potential new plan");
@@ -222,7 +230,7 @@ namespace Agents
                 
                     _currentAction = _actionPlan.Actions.Pop();
                     Debug.Log($"Popped action: {_currentAction.Name}");
-                
+                    
                     // Verify all precondition effects are true
                     if (_currentAction.Preconditions.All(b => b.Evaluate())) {
                         _currentAction.Start();
@@ -248,17 +256,11 @@ namespace Agents
                         _lastGoal = _currentGoal;
                         _currentGoal = null;
                     }
+                    else
+                    {
+                        UpdateDebugPlanInfo();
+                    }
                 }
-            }
-        }
-
-        private void UpdateBeliefs()
-        {
-            _beliefsSerialized.Clear();
-            
-            foreach (KeyValuePair<string, AgentBelief> keyVPair in _beliefs)
-            {
-                _beliefsSerialized.Add(keyVPair.Key, keyVPair.Value);
             }
         }
 
@@ -276,6 +278,7 @@ namespace Agents
             ActionPlan potentialPlan = _gPlanner.Plan(this, goalsToCheck, _lastGoal);
             if (potentialPlan != null) {
                 _actionPlan = potentialPlan;
+                UpdateDebugPlanInfo();
             }
         }
 
@@ -296,11 +299,58 @@ namespace Agents
             if (Ammo <= 0) return;
     
             GameObject projectile = Instantiate(_projectile);
+            projectile.transform.position = transform.position;
+            projectile.transform.forward = transform.forward;
             Rigidbody rb = projectile.GetComponent<Rigidbody>();
             
             rb.AddForce(this.transform.forward * 10f, ForceMode.Impulse);
 
             Ammo--;
         }
+
+        private bool RaycastHitGameObject()
+        {
+
+            // No layer mask specified, hit everything
+            if (Physics.Raycast(this.transform.position,
+                    this.transform.forward, out _hit, _chaseSensor.DetectionRadius))
+            {
+                return _hit.collider != null && _hit.collider.gameObject != null;
+            }
+
+            return false;
+
+        }
+
+        #region Debug Tools
+        private void UpdateActiveBeliefs()
+        {
+            _activeBeliefs.Clear();
+            foreach (var belief in _beliefs)
+            {
+                if (belief.Value.Evaluate())
+                {
+                    _activeBeliefs.Add(belief.Key);
+                }
+            }
+        }
+        private void UpdateDebugPlanInfo()
+        {
+            if (_actionPlan == null)
+            {
+                _debugPlan = null;
+                return;
+            }
+    
+            _debugPlan = new SerializableActionPlan
+            {
+                GoalName = _actionPlan.AgentGoal?.Name ?? "None",
+                ActionCount = _actionPlan.Actions?.Count ?? 0,
+                TotalCost = _actionPlan.TotalCost,
+                ActionNames = _actionPlan.Actions?.Select(a => a.Name).ToList() ?? new List<string>()
+            };
+        }
+
+        #endregion
     }
 }
