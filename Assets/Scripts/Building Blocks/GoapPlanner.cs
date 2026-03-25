@@ -14,153 +14,191 @@ namespace Building_Blocks
 
     public class GoapPlanner : IGoapPlanner
     {
+        // Cache for state keys to avoid repeated string allocations
+        private readonly Dictionary<int, string> _stateKeyCache = new();
+        
         public ActionPlan Plan(GoapAgent agent, HashSet<AgentGoal> goals, AgentGoal mostRecentGoal = null)
         {
-            // Order goals by priority, descending
-            List<AgentGoal> orderedGoals = goals
-                // Don't include goals where the effects are already complete
+            // Pre-filter goals that are already satisfied
+            var validGoals = goals
                 .Where(g => g.DesiredEffects.Any(b => !b.Evaluate()))
-                // Operator to not grab the same top goal over and over
-                .OrderByDescending(g => g == mostRecentGoal ? g.Priority -0.01 : g.Priority)
                 .ToList();
             
-            foreach (AgentGoal goal in orderedGoals)
+            // Sort once with priority adjustment for most recent goal
+            validGoals.Sort((a, b) =>
             {
-                // Step 1: Get required effects that aren't already true
-                HashSet<AgentBelief> startRequired = new(goal.DesiredEffects
-                    .Where(b => !b.Evaluate()));
+                float priorityA = a == mostRecentGoal ? a.Priority - 0.01f : a.Priority;
+                float priorityB = b == mostRecentGoal ? b.Priority - 0.01f : b.Priority;
+                return priorityB.CompareTo(priorityA); // Descending order
+            });
+
+            foreach (AgentGoal goal in validGoals)
+            {
+                // Get required effects that aren't already true
+                HashSet<AgentBelief> startRequired = new(goal.DesiredEffects.Where(b => !b.Evaluate()));
                 
-                // If nothing required, this goal is already satisfied
+                // Early skip if no effects needed (should be caught by filter, but safe check)
                 if (startRequired.Count == 0) continue;
                 
-                Debug.Log($"Trying to achieve goal: {goal.Name}");
-                
-                // Step 2: Create start node
-                Node startNode = new(null, null, startRequired, 0);
-                float startH = Heuristic(startRequired);
-                
-                // Step 3: Initialize priority queue and visited set
-                PriorityQueue<Node> queue = new();
-                queue.Enqueue(startNode, startH);
-                
-                Dictionary<string, float> visited = new() { [GetStateKey(startRequired)] = 0 };
-
-                // Step 4: A* loop
-                while (queue.Count > 0)
+                ActionPlan plan = FindPlanForGoal(agent, goal, startRequired);
+                if (plan != null)
                 {
-                    Node currentNode = queue.Dequeue();
-                    
-                    // Check if goal reached
-                    if (currentNode.RequiredEffects.Count == 0)
-                    {
-                        Debug.Log($"Goal {goal.Name} reached!");
-                        
-                        // Reconstruct plan by walking backwards from the goal node
-                        Stack<AgentAction> actionStack = new();
-                        Node node = currentNode;
-                        
-                        // Collect actions in reverse order (from goal back to start)
-                        while (node.Parent != null)
-                        {
-                            if (node.Action != null)
-                            {
-                                actionStack.Push(node.Action);
-                            }
-                            node = node.Parent;
-                        }
-                        
-                        // Reverse to get correct execution order
-                        Stack<AgentAction> correctOrderStack = new();
-                        while (actionStack.Count > 0)
-                        {
-                            correctOrderStack.Push(actionStack.Pop());
-                        }
-                        
-                        Debug.Log($"Found plan with {correctOrderStack.Count} actions for goal: {goal.Name}");
-                        return new ActionPlan(goal, correctOrderStack, currentNode.Cost);
-                    }
-                    
-                    // Generate successors
-                    foreach (AgentAction action in agent.Actions)
-                    {
-                        // Check if this action satisfies any required effects
-                        bool hasIntersection = action.Effects.Any(e => currentNode.RequiredEffects.Contains(e));
-                        if (!hasIntersection) continue;
-                        
-                        Debug.Log($"Action {action.Name} can help achieve {goal.Name}");
-                        
-                        // Calculate new required effects: (current - action.Effects) + action.Preconditions
-                        HashSet<AgentBelief> newRequired = new(currentNode.RequiredEffects);
-                        
-                        // Remove effects that this action satisfies
-                        newRequired.ExceptWith(action.Effects);
-                        
-                        // Add preconditions, but ONLY if they aren't already true in the current world state
-                        foreach (AgentBelief precondition in action.Preconditions)
-                        {
-                            if (!precondition.Evaluate())
-                            {
-                                newRequired.Add(precondition);
-                            }
-                        }
-                        
-                        float newG = currentNode.Cost + action.Cost;
-                        float newH = Heuristic(newRequired);
-                        float newF = newG + newH;
-                        
-                        string stateKey = GetStateKey(newRequired);
-                        
-                        // Check if we've seen this state with a better or equal cost
-                        if (visited.TryGetValue(stateKey, out float existingCost))
-                        {
-                            if (newG >= existingCost) continue;
-                        }
-                        
-                        visited[stateKey] = newG;
-                        Node newNode = new(currentNode, action, newRequired, newG);
-                        queue.Enqueue(newNode, newF);
-                    }
+                    return plan;
                 }
-                
-                Debug.Log($"No plan found for goal: {goal.Name}");
             }
+            
             return null;
         }
-        
-        private static string GetStateKey(HashSet<AgentBelief> requiredEffects)
+
+        private ActionPlan FindPlanForGoal(GoapAgent agent, AgentGoal goal, HashSet<AgentBelief> startRequired)
         {
-            // You'll need to sort the belief names to ensure consistent keys
-            // For now, just join them with commas
-            return string.Join(",", requiredEffects.Select(b => b.Name).OrderBy(n => n));
+            // Create start node
+            Node startNode = new(null, null, startRequired, 0);
+            float startH = Heuristic(startRequired);
+            
+            // Use priority queue with better performance characteristics
+            var queue = new PriorityQueue<Node>();
+            queue.Enqueue(startNode, startH);
+            
+            // Use dictionary with custom comparer for HashSet<string> to avoid string concatenation
+            var visited = new Dictionary<int, float>();
+            visited[GetStateKeyHash(startRequired)] = 0;
+
+            while (queue.Count > 0)
+            {
+                Node currentNode = queue.Dequeue();
+                
+                // Goal reached - reconstruct plan
+                if (currentNode.RequiredEffects.Count == 0)
+                {
+                    return ReconstructPlan(goal, currentNode);
+                }
+                
+                // Generate successors
+                foreach (AgentAction action in agent.Actions)
+                {
+                    // Check if this action can help achieve any required effect
+                    if (!HasUsefulEffects(action, currentNode.RequiredEffects)) continue;
+                    
+                    // Calculate new required effects
+                    HashSet<AgentBelief> newRequired = CalculateNewRequired(currentNode.RequiredEffects, action);
+                    
+                    float newCost = currentNode.Cost + action.Cost;
+                    float newHeuristic = Heuristic(newRequired);
+                    int stateKey = GetStateKeyHash(newRequired);
+                    
+                    // Check if we've found a better path to this state
+                    if (visited.TryGetValue(stateKey, out float existingCost) && newCost >= existingCost)
+                    {
+                        continue;
+                    }
+                    
+                    visited[stateKey] = newCost;
+                    Node newNode = new(currentNode, action, newRequired, newCost);
+                    queue.Enqueue(newNode, newCost + newHeuristic);
+                }
+            }
+            
+            return null;
         }
+
+        private bool HasUsefulEffects(AgentAction action, HashSet<AgentBelief> requiredEffects)
+        {
+            foreach (AgentBelief effect in action.Effects)
+            {
+                if (requiredEffects.Contains(effect))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private HashSet<AgentBelief> CalculateNewRequired(HashSet<AgentBelief> currentRequired, AgentAction action)
+        {
+            // Create new hashset with capacity hint for better performance
+            var newRequired = new HashSet<AgentBelief>(currentRequired.Count + action.Preconditions.Count);
+            
+            // Add all current required effects except those satisfied by this action
+            foreach (AgentBelief effect in currentRequired)
+            {
+                if (!action.Effects.Contains(effect))
+                {
+                    newRequired.Add(effect);
+                }
+            }
+            
+            // Add preconditions that aren't already satisfied
+            foreach (AgentBelief precondition in action.Preconditions)
+            {
+                if (!precondition.Evaluate())
+                {
+                    newRequired.Add(precondition);
+                }
+            }
+            
+            return newRequired;
+        }
+
+        private ActionPlan ReconstructPlan(AgentGoal goal, Node endNode)
+        {
+            var actionStack = new Stack<AgentAction>();
+            Node node = endNode;
+            
+            // Collect actions in reverse order
+            while (node.Parent != null)
+            {
+                if (node.Action != null)
+                {
+                    actionStack.Push(node.Action);
+                }
+                node = node.Parent;
+            }
+            
+            // Reverse to correct order
+            var correctOrderStack = new Stack<AgentAction>();
+            while (actionStack.Count > 0)
+            {
+                correctOrderStack.Push(actionStack.Pop());
+            }
+            
+            return new ActionPlan(goal, correctOrderStack, endNode.Cost);
+        }
+
+        private int GetStateKeyHash(HashSet<AgentBelief> requiredEffects)
+        {
+            // Use a deterministic hash code based on belief names
+            int hash = 17;
+            foreach (var belief in requiredEffects.OrderBy(b => b.Name))
+            {
+                hash = hash * 31 + belief.Name.GetHashCode();
+            }
+            return hash;
+        }
+
         private static float Heuristic(HashSet<AgentBelief> requiredEffects)
         {
-            // Start simple - just count remaining effects
-            // You can improve this later
+            // Simple count heuristic - can be improved with domain knowledge
             return requiredEffects.Count;
         }
     }
 
     /// <summary>
     /// Node graph of actions, made up of a Parent Node, an Agent Action, a HashSet of AgentBelief,
-    /// a List of Nodes for the Leaves and the Cost as a float
+    /// and the Cost as a float
     /// </summary>
     public class Node
     {
         public Node Parent { get; }
         public AgentAction Action { get; }
         public HashSet<AgentBelief> RequiredEffects { get; }
-        public List<Node> Leaves { get; }
         public float Cost { get; }
-    
-        public bool IsLeafDead => Leaves.Count == 0 && Action == null;
 
         public Node(Node parent, AgentAction action, HashSet<AgentBelief> effects, float cost)
         {
             Parent = parent;
             Action = action;
             RequiredEffects = new HashSet<AgentBelief>(effects);
-            Leaves = new List<Node>();
             Cost = cost;
         }
     }
@@ -173,9 +211,9 @@ namespace Building_Blocks
     {
         public AgentGoal AgentGoal { get; }
         public Stack<AgentAction> Actions { get; }
-        public float TotalCost {get; set;}
+        public float TotalCost { get; set; }
     
-        public ActionPlan(AgentGoal agentGoal,  Stack<AgentAction> actions,  float totalCost)
+        public ActionPlan(AgentGoal agentGoal, Stack<AgentAction> actions, float totalCost)
         {
             AgentGoal = agentGoal;
             Actions = actions;

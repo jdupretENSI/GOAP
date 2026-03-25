@@ -33,7 +33,7 @@ namespace Utilities
 
             if (lowestPriorityIndex == -1)
             {
-                Debug.LogWarning("Priority queue contains no items");
+                // Debug.LogWarning("Priority queue contains no items");
                 return default;
             }
             T returnItem = _items[lowestPriorityIndex];
@@ -59,7 +59,7 @@ namespace Utilities
 
             if (lowestPriorityIndex == -1)
             {
-                Debug.LogWarning("Priority queue contains no items");
+                // Debug.LogWarning("Priority queue contains no items");
                 return default;
             }
             

@@ -5,9 +5,6 @@ using UnityEngine;
 
 namespace Building_Blocks
 {
-    /// <summary>
-    /// Helper class that will enable us to create a dictionary of Beliefs
-    /// </summary>
     public class BeliefFactory
     {
         private readonly GoapAgent _goapAgent;
@@ -34,53 +31,53 @@ namespace Building_Blocks
                 .Build());
         }
 
-        /// <summary>
-        /// Overload if passing a transform, will get the transform position
-        /// </summary>
         public void AddLocationBelief(string key, float distance, Transform locationCondition)
         {
-            AddLocationBelief(key, distance, locationCondition.position);
-        }
-
-        /// <summary>
-        /// Are we in range of this thing? This method will create a belief to verify this statement
-        /// </summary>
-        /// <param name="key"></param>
-        /// <param name="distance">Distance to location</param>
-        /// <param name="locationCondition">Location itself</param>
-        public void AddLocationBelief(string key, float distance, Vector3 locationCondition)
-        {
+            // Instead of polling, we'll use a flag set by the station.
+            // The flag is stored in the agent, so we just create a belief that reads it.
             _beliefs.Add(key, new AgentBelief.Builder(key)
-                .WithCondition(() => InRangeOf(locationCondition, distance))
-                .WithLocation(() => locationCondition)
+                .WithCondition(() => _goapAgent.GetLocationFlag(key))
                 .Build());
         }
 
-        private bool InRangeOf(Vector3 pos, float range) => Vector3.Distance(_goapAgent.transform.position, pos) < range;
+        public void AddLocationBelief(string key, float distance, Vector3 locationCondition)
+        {
+            // For static locations not tied to a station, polling might still be needed,
+            // but in our case we only use station locations. For simplicity, we keep this overload.
+            _beliefs.Add(key, new AgentBelief.Builder(key)
+                .WithCondition(() => _goapAgent.GetLocationFlag(key))
+                .Build());
+        }
     }
-    
-    
+
     public class AgentBelief
     {
         private AgentBelief(string name)
         {
             Name = name;
         }
-    
-        /// <summary>
-        /// For debugging
-        /// </summary>
+
         public string Name { get; }
-    
+        public event Action<AgentBelief> OnValueChanged;
+
         private Func<bool> _condition = () => false;
-        private Func<Vector3> _observedLocation =  () => Vector3.zero;
-    
-        /// <summary>
-        /// When we want to find the location of this belief it will be reevaluated
-        /// </summary>
+        private Func<Vector3> _observedLocation = () => Vector3.zero;
+        private bool _currentValue;
+
         public Vector3 Location => _observedLocation();
-    
-        public bool Evaluate() => _condition();
+
+        public bool Evaluate() => _currentValue;
+
+        // Called externally when the underlying data may have changed.
+        public void Refresh()
+        {
+            bool newValue = _condition();
+            if (newValue != _currentValue)
+            {
+                _currentValue = newValue;
+                OnValueChanged?.Invoke(this);
+            }
+        }
 
         public class Builder
         {
@@ -94,21 +91,17 @@ namespace Building_Blocks
             public Builder WithCondition(Func<bool> condition)
             {
                 _agentBelief._condition = condition;
+                _agentBelief._currentValue = condition(); // initial evaluation
                 return this;
             }
 
             public Builder WithLocation(Func<Vector3> location)
             {
-                _agentBelief._observedLocation =  location;
+                _agentBelief._observedLocation = location;
                 return this;
             }
 
-            public AgentBelief Build()
-            {
-                return _agentBelief;
-            }
+            public AgentBelief Build() => _agentBelief;
         }
-    
-    
     }
 }
