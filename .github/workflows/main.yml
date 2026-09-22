@@ -2,8 +2,7 @@ name: Build and Publish
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       version:
@@ -17,7 +16,6 @@ on:
 
 env:
   UNITY_VERSION: 6000.3.10f1
-  PROJECT_PATH: .
   BUILD_ROOT: Build/Windows
   ITCH_TARGET: jdupretENSI/goap:windows
 
@@ -45,27 +43,33 @@ jobs:
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
-            RAW="${{ github.ref_name }}"          # e.g. v0.3.1
+            RAW="${{ github.ref_name }}"
           else
             RAW="${{ github.event.inputs.version }}"
           fi
-          # strip a single leading v/V, but keep "dev" as-is
           CLEAN="${RAW#v}"
           CLEAN="${CLEAN#V}"
           echo "raw=$RAW"       >> "$GITHUB_OUTPUT"
           echo "clean=$CLEAN"   >> "$GITHUB_OUTPUT"
           echo "Version: $RAW -> $CLEAN"
 
+      - name: Activate Unity
+        uses: game-ci/unity-activate@v2
+        env:
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+
       - name: Build
         uses: game-ci/unity-builder@v4
         env:
-          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+          PROJECT_VERSION: ${{ steps.ver.outputs.raw }}
+          PROJECT_SHA: ${{ github.sha }}
         with:
           unityVersion: ${{ env.UNITY_VERSION }}
           targetPlatform: StandaloneWindows64
-          projectPath: ${{ env.PROJECT_PATH }}
+          projectPath: .
           buildMethod: Goap.BuildTools.BuildRunner.BuildWindows
           allowDirtyBuild: true
 
