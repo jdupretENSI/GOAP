@@ -20,8 +20,50 @@ env:
   ITCH_TARGET: jdupretENSI/goap:windows
 
 jobs:
+  # ------------------------------------------------------------------
+  # 1. Acquire a Unity Personal license online and update the secret.
+  #    Runs on every workflow trigger. Requires UNITY_EMAIL, UNITY_PASSWORD,
+  #    and a PAT in GH_PAT with "secrets:write" for this repo.
+  # ------------------------------------------------------------------
+  acquire_license:
+    name: Acquire Unity License
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install unity-license-activate
+        run: npm install --global unity-license-activate
+
+      - name: Activate Unity license
+        run: unity-license-activate "${{ secrets.UNITY_EMAIL }}" "${{ secrets.UNITY_PASSWORD }}"
+
+      - name: Read generated .ulf file
+        id: ulf
+        uses: juliangruber/read-file-action@v1
+        with:
+          path: ./Unity_lic.ulf
+
+      - name: Update UNITY_LICENSE secret
+        uses: hmanzur/actions-set-secret@v2.1.0
+        with:
+          name: 'UNITY_LICENSE'
+          value: '${{ steps.ulf.outputs.content }}'
+          repository: ${{ github.repository }}
+          token: ${{ secrets.GH_PAT }}
+
+  # ------------------------------------------------------------------
+  # 2. Build the Windows player.
+  # ------------------------------------------------------------------
   build:
     name: Build Windows player
+    needs: acquire_license
     runs-on: ubuntu-latest
 
     steps:
@@ -53,15 +95,10 @@ jobs:
           echo "clean=$CLEAN"   >> "$GITHUB_OUTPUT"
           echo "Version: $RAW -> $CLEAN"
 
-      - name: Activate Unity
-        uses: game-ci/unity-activate@v2
-        env:
-          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
-          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
-
       - name: Build
         uses: game-ci/unity-builder@v4
         env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
           PROJECT_VERSION: ${{ steps.ver.outputs.raw }}
@@ -80,6 +117,9 @@ jobs:
           path: ${{ env.BUILD_ROOT }}/${{ steps.ver.outputs.clean }}
           if-no-files-found: error
 
+  # ------------------------------------------------------------------
+  # 3. Push the build to itch.io.
+  # ------------------------------------------------------------------
   publish:
     name: Publish to itch.io
     needs: build
