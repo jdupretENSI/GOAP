@@ -12,7 +12,13 @@ on:
       push_to_itch:
         description: 'Push to itch.io after build'
         required: false
-        default: 'false'
+        type: boolean
+        default: false
+
+# Cancel superseded runs on the same ref instead of burning build minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   UNITY_VERSION: 6000.3.10f1
@@ -20,11 +26,211 @@ env:
 
 jobs:
   # ------------------------------------------------------------------
+  # 0. Fail fast: verify every secret, tool and project precondition.
+  # ------------------------------------------------------------------
+  preflight:
+    name: Preflight checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.ver.outputs.clean }}
+      raw_version: ${{ steps.ver.outputs.raw }}
+      publish: ${{ steps.decide.outputs.publish }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # No LFS needed for static validation; keeps preflight cheap.
+          lfs: false
+
+      - name: Validate required secrets
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+          BUTLER_API_KEY: ${{ secrets.BUTLER_API_KEY }}
+          INPUT_PUSH: ${{ github.event.inputs.push_to_itch }}
+          EVENT_NAME: ${{ github.event_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+
+          require() {
+            local name="$1" value="$2"
+            if [ -z "${value:-}" ]; then
+              echo "::error title=Missing secret::Secret '$name' is not set or is empty. Add it in Settings > Secrets and variables > Actions."
+              missing=1
+            else
+              echo "OK: $name is set"
+            fi
+          }
+
+          # Unity activation: either a .ulf license, or serial + credentials.
+          if [ -n "${UNITY_LICENSE:-}" ]; then
+            echo "OK: UNITY_LICENSE is set"
+          else
+            echo "::notice::UNITY_LICENSE not set - falling back to serial-based activation."
+            require UNITY_SERIAL "$UNITY_SERIAL"
+            require UNITY_EMAIL  "$UNITY_EMAIL"
+            require UNITY_PASSWORD "$UNITY_PASSWORD"
+          fi
+
+          # Butler is only needed when we actually publish.
+          WILL_PUBLISH=false
+          if [ "$EVENT_NAME" = "push" ] || [ "${INPUT_PUSH:-false}" = "true" ]; then
+            WILL_PUBLISH=true
+          fi
+          if [ "$WILL_PUBLISH" = "true" ]; then
+            require BUTLER_API_KEY "$BUTLER_API_KEY"
+          else
+            echo "Skipping BUTLER_API_KEY check (publish disabled for this run)."
+          fi
+
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Preflight failed - one or more required secrets are missing."
+            exit 1
+          fi
+
+      - name: Validate Unity project layout
+        env:
+          UNITY_VERSION: ${{ env.UNITY_VERSION }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for f in ProjectSettings/ProjectVersion.txt Packages/manifest.json Assets; do
+            if [ ! -e "$f" ]; then
+              echo "::error title=Missing project file::'$f' not found. Is the workflow running at the Unity project root?"
+              exit 1
+            fi
+            echo "OK: found $f"
+          done
+
+          FILE_VERSION=$(sed -n 's/^m_EditorVersion: *//p' ProjectSettings/ProjectVersion.txt | tr -d '\r' | head -1)
+          if [ "$FILE_VERSION" != "$UNITY_VERSION" ]; then
+            echo "::error title=Unity version mismatch::ProjectSettings/ProjectVersion.txt declares '$FILE_VERSION' but the workflow UNITY_VERSION is '$UNITY_VERSION'."
+            exit 1
+          fi
+          echo "OK: Unity version $UNITY_VERSION matches ProjectSettings."
+
+      - name: Validate build entry point
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! grep -rqE 'class[[:space:]]+BuildRunner' Assets --include='*.cs'; then
+            echo "::error title=Missing build entry point::Goap.BuildTools.BuildRunner was not found under Assets/. game-ci will fail."
+            exit 1
+          fi
+          if ! grep -rqE 'static[[:space:]]+void[[:space:]]+BuildWindows' Assets --include='*.cs'; then
+            echo "::error title=Missing build method::Goap.BuildTools.BuildRunner.BuildWindows was not found under Assets/."
+            exit 1
+          fi
+          echo "OK: build entry point Goap.BuildTools.BuildRunner.BuildWindows found."
+
+      - name: Resolve and validate version
+        id: ver
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "push" ]; then
+            RAW="$REF_NAME"
+          else
+            RAW="${INPUT_VERSION:-dev}"
+          fi
+
+          CLEAN="${RAW#v}"
+          CLEAN="${CLEAN#V}"
+
+          if [ -z "$CLEAN" ]; then
+            echo "::error title=Invalid version::Version resolved to an empty string (raw='$RAW')."
+            exit 1
+          fi
+
+          if ! printf '%s' "$CLEAN" | grep -Eq '^[0-9A-Za-z][0-9A-Za-z._+-]*$'; then
+            echo "::error title=Invalid version::'$CLEAN' is not a usable version string. Allowed characters: letters, digits, '.', '_', '+', '-' (must start alphanumeric)."
+            exit 1
+          fi
+
+          echo "raw=$RAW"     >> "$GITHUB_OUTPUT"
+          echo "clean=$CLEAN" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: '$RAW' -> '$CLEAN'"
+
+      - name: Validate itch.io target
+        env:
+          ITCH_TARGET: ${{ env.ITCH_TARGET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$ITCH_TARGET" | grep -Eq '^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$'; then
+            echo "::error title=Invalid ITCH_TARGET::'$ITCH_TARGET' does not match 'user/game:channel'."
+            exit 1
+          fi
+          echo "OK: itch target '$ITCH_TARGET' is well formed."
+
+      - name: Decide whether to publish
+        id: decide
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PUSH: ${{ github.event.inputs.push_to_itch }}
+          VERSION: ${{ steps.ver.outputs.clean }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "push" ]; then
+            PUBLISH=true
+          elif [ "${INPUT_PUSH:-false}" = "true" ]; then
+            PUBLISH=true
+          else
+            PUBLISH=false
+          fi
+
+          if [ "$PUBLISH" = "true" ] && [ "$VERSION" = "dev" ]; then
+            echo "::error title=Refusing to publish 'dev'::Push a 'vX.Y.Z' tag or pass a real version instead of 'dev' when publishing."
+            exit 1
+          fi
+
+          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+          echo "Publish to itch.io: $PUBLISH"
+
+      - name: Preflight summary
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RAW: ${{ steps.ver.outputs.raw }}
+          CLEAN: ${{ steps.ver.outputs.clean }}
+          PUBLISH: ${{ steps.decide.outputs.publish }}
+          UNITY_VERSION: ${{ env.UNITY_VERSION }}
+          ITCH_TARGET: ${{ env.ITCH_TARGET }}
+        run: |
+          {
+            echo "## Preflight OK"
+            echo ""
+            echo "| Setting | Value |"
+            echo "| --- | --- |"
+            echo "| Trigger | \`$EVENT_NAME\` |"
+            echo "| Raw version | \`$RAW\` |"
+            echo "| Clean version | \`$CLEAN\` |"
+            echo "| Unity version | \`$UNITY_VERSION\` |"
+            echo "| itch target | \`$ITCH_TARGET\` |"
+            echo "| Will publish | \`$PUBLISH\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ------------------------------------------------------------------
   # 1. Build the Windows player.
   # ------------------------------------------------------------------
   build:
     name: Build Windows player
+    needs: preflight
     runs-on: ubuntu-latest
+    timeout-minutes: 120
 
     steps:
       - name: Checkout
@@ -40,26 +246,12 @@ jobs:
           restore-keys: |
             Library-${{ env.UNITY_VERSION }}-
 
-      - name: Resolve version
-        id: ver
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            RAW="${{ github.ref_name }}"
-          else
-            RAW="${{ github.event.inputs.version }}"
-          fi
-          CLEAN="${RAW#v}"
-          CLEAN="${CLEAN#V}"
-          echo "raw=$RAW"     >> "$GITHUB_OUTPUT"
-          echo "clean=$CLEAN" >> "$GITHUB_OUTPUT"
-          echo "Version: $RAW -> $CLEAN"
-
       - name: Build
         id: build
         uses: game-ci/unity-builder@v4
         env:
           UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
         with:
@@ -69,14 +261,14 @@ jobs:
           buildMethod: Goap.BuildTools.BuildRunner.BuildWindows
           allowDirtyBuild: true
           customParameters: >
-            -buildVersion "${{ steps.ver.outputs.clean }}"
+            -buildVersion "${{ needs.preflight.outputs.version }}"
             -buildSha "${{ github.sha }}"
 
       - name: Locate build output
         id: locate
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           echo "PWD: $(pwd)"
           echo "--- Build/ ---"
           find Build -maxdepth 3 2>/dev/null || true
@@ -90,6 +282,11 @@ jobs:
           fi
 
           DIR=$(dirname "$INFO")
+          if [ ! -d "$DIR" ] || [ -z "$(ls -A "$DIR")" ]; then
+            echo "::error::Resolved build directory '$DIR' is empty."
+            exit 1
+          fi
+
           echo "resolved=$DIR" >> "$GITHUB_OUTPUT"
           echo "Resolved artifact path: $DIR"
           cat "$INFO"
@@ -97,48 +294,52 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows-${{ steps.ver.outputs.clean }}
+          name: windows-${{ needs.preflight.outputs.version }}
           path: ${{ steps.locate.outputs.resolved }}
           if-no-files-found: error
+          retention-days: 14
 
   # ------------------------------------------------------------------
   # 2. Push the build to itch.io.
   # ------------------------------------------------------------------
   publish:
     name: Publish to itch.io
-    needs: build
+    needs: [preflight, build]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || github.event.inputs.push_to_itch == 'true'
+    timeout-minutes: 30
+    if: needs.preflight.outputs.publish == 'true'
 
     steps:
-      - name: Resolve version
-        id: ver
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            RAW="${{ github.ref_name }}"
-          else
-            RAW="${{ github.event.inputs.version }}"
-          fi
-          CLEAN="${RAW#v}"
-          CLEAN="${CLEAN#V}"
-          echo "clean=$CLEAN" >> "$GITHUB_OUTPUT"
-
       - name: Download build artifact
         uses: actions/download-artifact@v4
         with:
-          name: windows-${{ steps.ver.outputs.clean }}
+          name: windows-${{ needs.preflight.outputs.version }}
           path: build
 
-      - name: Install butler
+      - name: Verify downloaded artifact
+        shell: bash
         run: |
-          curl -L -o butler.zip https://broth.itch.zone/butler/linux-amd64/LATEST/archive/default
-          unzip butler.zip
+          set -euo pipefail
+          if [ -z "$(ls -A build)" ]; then
+            echo "::error::Downloaded artifact 'windows-${{ needs.preflight.outputs.version }}' is empty."
+            exit 1
+          fi
+          echo "Artifact contents:"
+          find build -maxdepth 2 | head -50
+
+      - name: Install butler
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o butler.zip https://broth.itch.zone/butler/linux-amd64/LATEST/archive/default
+          unzip -q butler.zip
           chmod +x butler
           ./butler -V
 
       - name: Push to itch.io
         env:
           BUTLER_API_KEY: ${{ secrets.BUTLER_API_KEY }}
+          VERSION: ${{ needs.preflight.outputs.version }}
         run: |
-          ./butler push build "${{ env.ITCH_TARGET }}" --userversion "${{ steps.ver.outputs.clean }}"
+          set -euo pipefail
+          ./butler push build "${{ env.ITCH_TARGET }}" --userversion "$VERSION"
