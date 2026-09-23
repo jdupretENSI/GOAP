@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using UnityEditor;
@@ -12,6 +13,12 @@ namespace Goap.BuildTools
         /// <summary>Dossier racine des builds, relatif à la racine du projet. Ignoré par git.</summary>
         public const string OutputDir = "Build/Windows";
 
+        /// <summary>
+        /// Chemin (relatif à la racine projet) du script PowerShell d'upload.
+        /// Doit rester synchronisé avec Tools/upload-itchio.ps1.
+        /// </summary>
+        private const string ScriptRelativePath = "Tools/upload-itchio.ps1";
+
         /// <summary>Variable d'environnement portant le tag de livraison (ex. `v0.3.1`).</summary>
         private const string VersionVariable = "PROJECT_VERSION";
 
@@ -24,6 +31,10 @@ namespace Goap.BuildTools
         /// <summary>Argument CLI équivalent à <see cref="ShaVariable"/>.</summary>
         private const string ShaArg = "-buildSha";
 
+        // ------------------------------------------------------------------
+        // Menu items
+        // ------------------------------------------------------------------
+
         [MenuItem("Tools/Build and Publish on itchio")]
         public static void BuildAndPublish()
         {
@@ -31,7 +42,7 @@ namespace Goap.BuildTools
                 return;
 
             string root = Directory.GetCurrentDirectory();
-            string script = Path.Combine(root, "Tools", "upload-itchio.ps1");
+            string script = Path.Combine(root, ScriptRelativePath);
 
             if (!File.Exists(script))
             {
@@ -44,17 +55,33 @@ namespace Goap.BuildTools
                 ? string.Empty
                 : $" -Version \"{NormalizeVersion(version)}\"";
 
-            var psi = new System.Diagnostics.ProcessStartInfo
+            var psi = new ProcessStartInfo
             {
                 FileName = "powershell.exe",
-                Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{script}\" -SkipBuild " +
+                Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{script}\" " +
                             $"-BuildDir \"{outputDir}\"{versionArg}",
                 WorkingDirectory = root,
                 UseShellExecute = false
             };
 
-            using var process = System.Diagnostics.Process.Start(psi);
-            Debug.Log($"[{nameof(BuildRunner)}] Envoi lancé (PID {process?.Id}) pour {outputDir}.");
+            using var process = Process.Start(psi);
+            if (process == null)
+            {
+                Debug.LogError($"[{nameof(BuildRunner)}] Impossible de démarrer powershell.exe.");
+                return;
+            }
+
+            Debug.Log($"[{nameof(BuildRunner)}] Envoi en cours (PID {process.Id}) pour {outputDir}...");
+            process.WaitForExit();
+
+            if (process.ExitCode != 0)
+            {
+                Debug.LogError($"[{nameof(BuildRunner)}] Envoi échoué (code {process.ExitCode}). " +
+                               $"Relancez '{ScriptRelativePath}' manuellement pour voir la sortie complète.");
+                return;
+            }
+
+            Debug.Log($"[{nameof(BuildRunner)}] Envoi terminé avec succès pour {outputDir}.");
         }
 
         [MenuItem("Tools/Build")]
@@ -66,10 +93,28 @@ namespace Goap.BuildTools
                 EditorApplication.Exit(1);
         }
 
+        // ------------------------------------------------------------------
+        // Build
+        // ------------------------------------------------------------------
+
         /// <summary>La build elle-même. Rend `false` si elle a échoué.</summary>
         private static bool BuildPlayerNow(out string outputDir)
         {
             outputDir = null;
+
+            // 1. S'assurer que la cible active correspond à ce qu'on construit.
+            //    Sinon BuildPipeline.BuildPlayer échoue avec un message obscur
+            //    (surtout en local, quand l'éditeur est resté sur une autre plateforme).
+            if (EditorUserBuildSettings.activeBuildTarget != BuildTarget.StandaloneWindows64)
+            {
+                Debug.Log($"[{nameof(BuildRunner)}] Bascule vers StandaloneWindows64...");
+                if (!EditorUserBuildSettings.SwitchActiveBuildTarget(
+                        BuildTargetGroup.Standalone, BuildTarget.StandaloneWindows64))
+                {
+                    Fail("Impossible de basculer vers StandaloneWindows64 (module non installé ?).");
+                    return false;
+                }
+            }
 
             string previousVersion = PlayerSettings.bundleVersion;
             string version = ResolveVersion();
@@ -104,15 +149,33 @@ namespace Goap.BuildTools
 
             // On ne supprime QUE le dossier de cette version, pas les autres.
             if (Directory.Exists(outputDir))
-                Directory.Delete(outputDir, true);
+            {
+                try
+                {
+                    Directory.Delete(outputDir, true);
+                }
+                catch (Exception e)
+                {
+                    Fail($"Impossible de nettoyer '{outputDir}' : {e.Message}");
+                    return false;
+                }
+            }
             Directory.CreateDirectory(outputDir);
+
+            // Nom d'exécutable assaini : Unity échoue si ProductName contient
+            // un caractère invalide pour un nom de fichier.
+            string exeName = SanitizeFileName(Application.productName);
+            if (string.IsNullOrEmpty(exeName))
+                exeName = "Game";
 
             BuildPlayerOptions options = new()
             {
                 scenes = scenes,
-                locationPathName = Path.Combine(outputDir, $"{Application.productName}.exe"),
+                locationPathName = Path.Combine(outputDir, $"{exeName}.exe"),
                 target = BuildTarget.StandaloneWindows64,
                 targetGroup = BuildTargetGroup.Standalone,
+                // Pour une build de release, on peut passer à BuildOptions.StrictMode
+                // (mais cela fait échouer la build sur de simples warnings).
                 options = BuildOptions.None,
             };
 
@@ -129,7 +192,8 @@ namespace Goap.BuildTools
             finally
             {
                 PlayerSettings.bundleVersion = previousVersion;
-                AssetDatabase.SaveAssets();
+                try { AssetDatabase.SaveAssets(); }
+                catch (Exception e) { Debug.LogWarning($"[{nameof(BuildRunner)}] SaveAssets: {e.Message}"); }
             }
 
             BuildSummary summary = report.summary;
@@ -140,11 +204,20 @@ namespace Goap.BuildTools
                 return false;
             }
 
-            // Marqueur lisible par la CI, au cas où le nom de dossier diffère de ce que
-            // le workflow attend (ex. PROJECT_VERSION absent côté workflow).
-            File.WriteAllText(
-                Path.Combine(outputDir, "build-info.txt"),
-                $"folder={folderName}\nversion={stamped}\npath={outputDir}\n");
+            // Marqueur lisible par la CI. Son emplacement (Build/Windows/<version>/build-info.txt)
+            // doit rester compatible avec le `find Build/Windows -maxdepth 2 -name build-info.txt`
+            // du workflow. Il est exclu de l'upload itch via --ignore dans upload-itchio.ps1.
+            try
+            {
+                File.WriteAllText(
+                    Path.Combine(outputDir, "build-info.txt"),
+                    $"folder={folderName}\nversion={stamped}\npath={outputDir}\n");
+            }
+            catch (Exception e)
+            {
+                // Ne pas tuer une build réussie pour un fichier de métadonnées.
+                Debug.LogWarning($"[{nameof(BuildRunner)}] Écriture de build-info.txt ignorée : {e.Message}");
+            }
 
             Debug.Log($"BUILD_OUTPUT_PATH={outputDir}");
             Debug.Log($"[{nameof(BuildRunner)}] Build OK : {summary.totalSize / (1024 * 1024)} Mo, "
@@ -152,6 +225,10 @@ namespace Goap.BuildTools
 
             return true;
         }
+
+        // ------------------------------------------------------------------
+        // Helpers
+        // ------------------------------------------------------------------
 
         /// <summary>
         /// Version effective : argument CLI `-buildVersion` (via game-ci) sinon
@@ -209,7 +286,7 @@ namespace Goap.BuildTools
             if (plus > 0)
                 baseName = baseName.Substring(0, plus);
 
-            return SanitizeFolderName(baseName);
+            return SanitizeFileName(baseName);
         }
 
         private static string NormalizeVersion(string version)
@@ -220,10 +297,14 @@ namespace Goap.BuildTools
             return trimmed;
         }
 
-        private static string SanitizeFolderName(string name)
+        private static string SanitizeFileName(string name)
         {
+            if (string.IsNullOrEmpty(name))
+                return string.Empty;
+
             foreach (char c in Path.GetInvalidFileNameChars())
                 name = name.Replace(c, '_');
+
             return name.Trim();
         }
 
