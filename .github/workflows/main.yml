@@ -4,8 +4,6 @@ on:
   push:
     branches: [main]
     tags: ['v*']
-  pull_request:
-    branches: [main]
   workflow_dispatch:
     inputs:
       version:
@@ -25,9 +23,9 @@ concurrency:
 
 env:
   UNITY_VERSION: 6000.3.10f1
-  # Stable channel — used for tag pushes.
+  # Stable channel — used for tag pushes and manual publishes with a semver.
   ITCH_TARGET_RELEASE: jdupretENSI/goap:windows
-  # Dev channel — used for branch pushes when the operator opts in.
+  # Dev channel — used for manual publishes with a non-semver version.
   ITCH_TARGET_DEV: jdupretENSI/goap:windows-dev
 
 jobs:
@@ -158,8 +156,8 @@ jobs:
           elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             RAW="${INPUT_VERSION:-dev}"
           else
-            # Branch push (build, PR, ...). Synthesize a unique dev version
-            # so successive pushes don't overwrite each other on the dev channel.
+            # Branch push (main). Synthesize a unique dev version so
+            # successive merges don't collide in the artifact list.
             SHORT="${SHA:0:7}"
             RAW="dev-${REF_NAME}-${SHORT}"
           fi
@@ -232,7 +230,7 @@ jobs:
               TARGET="$DEV_TARGET"
             fi
           else
-            # Branch push / PR: build only. Never publish automatically.
+            # Branch push (main): build only. Never publish automatically.
             PUBLISH=false
           fi
 
@@ -337,11 +335,28 @@ jobs:
           echo "Resolved artifact path: $DIR"
           cat "$INFO"
 
+      - name: Zip build output
+        id: zip
+        shell: bash
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          DIR="${{ steps.locate.outputs.resolved }}"
+          OUT="windows-${VERSION}.zip"
+          # Zip the *contents* of the build folder, so extracting the
+          # archive drops the .exe and _Data/ at the root, not nested.
+          ( cd "$DIR" && zip -qr "$OLDPWD/$OUT" . )
+          echo "zip=$OUT" >> "$GITHUB_OUTPUT"
+          ls -lh "$OUT"
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-${{ needs.preflight.outputs.version }}
-          path: ${{ steps.locate.outputs.resolved }}
+          path: |
+            ${{ steps.locate.outputs.resolved }}
+            ${{ steps.zip.outputs.zip }}
           if-no-files-found: error
           retention-days: 14
 
@@ -349,7 +364,7 @@ jobs:
   # 2. Push the build to itch.io.
   #    - tag pushes             -> release channel (windows)
   #    - manual + push_to_itch  -> release if semver, else dev channel
-  #    - branch pushes / PRs    -> never publish (artifact only)
+  #    - branch pushes (main)   -> never publish (artifact only)
   # ------------------------------------------------------------------
   publish:
     name: Publish to itch.io
@@ -393,4 +408,63 @@ jobs:
         run: |
           set -euo pipefail
           echo "Pushing build/ -> $TARGET @ $VERSION"
-          ./butler push build "$TARGET" --userversion "$VERSION" --ignore "build-info.txt"
+          # The artifact contains both the unpacked folder and the zip.
+          # Exclude the zip so players don't see a redundant nested archive,
+          # and exclude build-info.txt so CI metadata isn't shipped.
+          ./butler push build "$TARGET" --userversion "$VERSION" \
+            --ignore "*.zip" \
+            --ignore "build-info.txt"
+
+  # ------------------------------------------------------------------
+  # 3. GitHub Release — tag pushes only.
+  #    Merges to main build an artifact but do NOT create a release,
+  #    so the repo's "Latest release" pointer always corresponds to a
+  #    real semver tag.
+  # ------------------------------------------------------------------
+  release:
+    name: GitHub Release
+    needs: [preflight, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-${{ needs.preflight.outputs.version }}
+          path: dist
+
+      - name: Locate zip
+        id: zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find dist -maxdepth 1 -name 'windows-*.zip' -print -quit)
+          if [ -z "$ZIP" ]; then
+            echo "::error::No windows-*.zip found in downloaded artifact."
+            exit 1
+          fi
+          echo "path=$ZIP"                >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$ZIP")"  >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ needs.preflight.outputs.version }}
+          body: |
+            Windows build for **${{ github.ref_name }}**.
+
+            - Version: `${{ needs.preflight.outputs.version }}`
+            - Commit: `${{ github.sha }}`
+            - itch.io: https://jdupretensi.itch.io/goap
+          prerelease: false
+          make_latest: true
+          generate_release_notes: true
+          files: ${{ steps.zip.outputs.path }}
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
