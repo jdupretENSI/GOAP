@@ -16,7 +16,6 @@ on:
 
 env:
   UNITY_VERSION: 6000.3.10f1
-  BUILD_ROOT: Build/Windows
   ITCH_TARGET: jdupretENSI/goap:windows
 
 jobs:
@@ -52,11 +51,12 @@ jobs:
           fi
           CLEAN="${RAW#v}"
           CLEAN="${CLEAN#V}"
-          echo "raw=$RAW"       >> "$GITHUB_OUTPUT"
-          echo "clean=$CLEAN"   >> "$GITHUB_OUTPUT"
+          echo "raw=$RAW"     >> "$GITHUB_OUTPUT"
+          echo "clean=$CLEAN" >> "$GITHUB_OUTPUT"
           echo "Version: $RAW -> $CLEAN"
 
       - name: Build
+        id: build
         uses: game-ci/unity-builder@v4
         env:
           UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
@@ -71,11 +71,42 @@ jobs:
           buildMethod: Goap.BuildTools.BuildRunner.BuildWindows
           allowDirtyBuild: true
 
+      - name: Locate build output
+        id: locate
+        shell: bash
+        run: |
+          echo "PWD: $(pwd)"
+          echo "--- top level ---"
+          ls -la
+          echo "--- Build/ ---"
+          find Build -maxdepth 4 2>/dev/null || echo "no Build/"
+          echo "--- build/ ---"
+          find build -maxdepth 4 2>/dev/null || echo "no build/"
+          echo "--- unity-builder buildsPath output ---"
+          echo "${{ steps.build.outputs.buildsPath }}"
+
+          # Prefer the path unity-builder reports; fall back to our own
+          # convention (Build/Windows/<version>) if that path has no files.
+          CANDIDATE="${{ steps.build.outputs.buildsPath }}"
+          FALLBACK="Build/Windows/${{ steps.ver.outputs.clean }}"
+
+          if [ -n "$CANDIDATE" ] && [ -d "$CANDIDATE" ] && [ -n "$(ls -A "$CANDIDATE" 2>/dev/null)" ]; then
+            RESOLVED="$CANDIDATE"
+          elif [ -d "$FALLBACK" ] && [ -n "$(ls -A "$FALLBACK" 2>/dev/null)" ]; then
+            RESOLVED="$FALLBACK"
+          else
+            echo "::error::No build output found. Tried '$CANDIDATE' and '$FALLBACK'."
+            exit 1
+          fi
+
+          echo "resolved=$RESOLVED" >> "$GITHUB_OUTPUT"
+          echo "Resolved artifact path: $RESOLVED"
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-${{ steps.ver.outputs.clean }}
-          path: ${{ env.BUILD_ROOT }}/${{ steps.ver.outputs.clean }}
+          path: ${{ steps.locate.outputs.resolved }}
           if-no-files-found: error
 
   # ------------------------------------------------------------------
