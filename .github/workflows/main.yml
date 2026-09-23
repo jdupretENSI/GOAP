@@ -23,9 +23,10 @@ concurrency:
 
 env:
   UNITY_VERSION: 6000.3.10f1
-  # Stable channel — used for tag pushes and manual publishes with a semver.
+  # Public stable channel — used for main pushes, tag pushes, and manual
+  # publishes with a semver version.
   ITCH_TARGET_RELEASE: jdupretENSI/goap:windows
-  # Dev channel — used for manual publishes with a non-semver version.
+  # Dev channel — only reachable via manual dispatch with a non-semver version.
   ITCH_TARGET_DEV: jdupretENSI/goap:windows-dev
 
 jobs:
@@ -59,6 +60,7 @@ jobs:
           INPUT_PUSH: ${{ github.event.inputs.push_to_itch }}
           EVENT_NAME: ${{ github.event_name }}
           REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
         shell: bash
         run: |
           set -euo pipefail
@@ -84,11 +86,16 @@ jobs:
             require UNITY_PASSWORD "$UNITY_PASSWORD"
           fi
 
-          # Butler is only needed when we actually publish.
+          # Butler is needed whenever we publish. On this workflow that's:
+          #   - any tag push
+          #   - any push to main
+          #   - manual dispatch with push_to_itch (default true)
           WILL_PUBLISH=false
           if [ "$REF_TYPE" = "tag" ]; then
             WILL_PUBLISH=true
-          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "${INPUT_PUSH:-false}" = "true" ]; then
+          elif [ "$EVENT_NAME" = "push" ] && [ "$REF_NAME" = "main" ]; then
+            WILL_PUBLISH=true
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "${INPUT_PUSH:-true}" = "true" ]; then
             WILL_PUBLISH=true
           fi
           if [ "$WILL_PUBLISH" = "true" ]; then
@@ -149,17 +156,24 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          SHORT="${SHA:0:7}"
 
           if [ "$REF_TYPE" = "tag" ]; then
-            # e.g. v0.3.1 -> 0.3.1
+            # Tag push: authoritative. v0.3.1 -> 0.3.1
             RAW="$REF_NAME"
           elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             RAW="${INPUT_VERSION:-dev}"
           else
-            # Branch push (main). Synthesize a unique dev version so
-            # successive merges don't collide in the artifact list.
-            SHORT="${SHA:0:7}"
-            RAW="dev-${REF_NAME}-${SHORT}"
+            # Push to main. main is the shippable branch, so we don't want a
+            # "dev-..." version string on the public itch channel. Instead
+            # read bundleVersion from ProjectSettings.asset and append the
+            # commit short-SHA as semver build metadata.
+            BUNDLE=$(sed -n 's/^  bundleVersion: *//p' ProjectSettings/ProjectSettings.asset | tr -d '\r' | head -1)
+            if [ -z "$BUNDLE" ]; then
+              echo "::error title=Missing bundleVersion::Could not read bundleVersion from ProjectSettings/ProjectSettings.asset."
+              exit 1
+            fi
+            RAW="${BUNDLE}+${SHORT}"
           fi
 
           CLEAN="${RAW#v}"
@@ -206,6 +220,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
           INPUT_PUSH: ${{ github.event.inputs.push_to_itch }}
           VERSION: ${{ steps.ver.outputs.clean }}
           RELEASE_TARGET: ${{ env.ITCH_TARGET_RELEASE }}
@@ -217,12 +232,15 @@ jobs:
           TARGET="$RELEASE_TARGET"
 
           if [ "$REF_TYPE" = "tag" ]; then
-            # Tag pushes always publish to the release channel.
+            # Tag push: public release.
             PUBLISH=true
             TARGET="$RELEASE_TARGET"
-          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "${INPUT_PUSH:-false}" = "true" ]; then
-            # Manual dispatch can publish; if the version looks like a real
-            # semver release (x.y.z) it goes to release, otherwise dev.
+          elif [ "$EVENT_NAME" = "push" ] && [ "$REF_NAME" = "main" ]; then
+            # Push to main: public release on the stable channel.
+            PUBLISH=true
+            TARGET="$RELEASE_TARGET"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "${INPUT_PUSH:-true}" = "true" ]; then
+            # Manual: publish by default. Semver -> public, otherwise dev.
             PUBLISH=true
             if printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
               TARGET="$RELEASE_TARGET"
@@ -230,12 +248,11 @@ jobs:
               TARGET="$DEV_TARGET"
             fi
           else
-            # Branch push (main): build only. Never publish automatically.
             PUBLISH=false
           fi
 
           if [ "$PUBLISH" = "true" ] && [ "$VERSION" = "dev" ]; then
-            echo "::error title=Refusing to publish 'dev'::Push a 'vX.Y.Z' tag or pass a real version instead of 'dev' when publishing."
+            echo "::error title=Refusing to publish 'dev'::Use a real version (tag or manual input) when publishing."
             exit 1
           fi
 
@@ -343,7 +360,9 @@ jobs:
         run: |
           set -euo pipefail
           DIR="${{ steps.locate.outputs.resolved }}"
-          OUT="windows-${VERSION}.zip"
+          # Sanitize '+' for a filename-safe zip name.
+          SAFE=$(printf '%s' "$VERSION" | tr '+' '_')
+          OUT="windows-${SAFE}.zip"
           # Zip the *contents* of the build folder, so extracting the
           # archive drops the .exe and _Data/ at the root, not nested.
           ( cd "$DIR" && zip -qr "$OLDPWD/$OUT" . )
@@ -362,9 +381,10 @@ jobs:
 
   # ------------------------------------------------------------------
   # 2. Push the build to itch.io.
-  #    - tag pushes             -> release channel (windows)
-  #    - manual + push_to_itch  -> release if semver, else dev channel
-  #    - branch pushes (main)   -> never publish (artifact only)
+  #    - tag pushes          -> :windows (public)
+  #    - main pushes         -> :windows (public)
+  #    - manual + push_to_itch (default true) -> :windows if semver,
+  #                                              :windows-dev otherwise
   # ------------------------------------------------------------------
   publish:
     name: Publish to itch.io
@@ -416,17 +436,18 @@ jobs:
             --ignore "build-info.txt"
 
   # ------------------------------------------------------------------
-  # 3. GitHub Release — tag pushes only.
-  #    Merges to main build an artifact but do NOT create a release,
-  #    so the repo's "Latest release" pointer always corresponds to a
-  #    real semver tag.
+  # 3. GitHub Release.
+  #    - main pushes -> synthetic tag "main-<sha7>", marked latest
+  #    - tag pushes  -> the tag itself, marked latest
   # ------------------------------------------------------------------
   release:
     name: GitHub Release
     needs: [preflight, build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: github.event_name == 'push' && github.ref_type == 'tag'
+    if: |
+      (github.event_name == 'push' && github.ref_type == 'tag')
+      || (github.event_name == 'push' && github.ref_type == 'branch' && github.ref_name == 'main')
     permissions:
       contents: write
 
@@ -450,11 +471,37 @@ jobs:
           echo "path=$ZIP"                >> "$GITHUB_OUTPUT"
           echo "name=$(basename "$ZIP")"  >> "$GITHUB_OUTPUT"
 
+      - name: Resolve release tag and title
+        id: tag
+        shell: bash
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          SHORT="${SHA:0:7}"
+
+          if [ "$REF_TYPE" = "tag" ]; then
+            TAG="$REF_NAME"
+            TITLE="Release $VERSION"
+          else
+            # main push — anchor the release to a synthetic tag.
+            TAG="main-${SHORT}"
+            TITLE="Build $VERSION"
+          fi
+
+          echo "tag=$TAG"     >> "$GITHUB_OUTPUT"
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $TAG"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: Release ${{ needs.preflight.outputs.version }}
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.title }}
+          target_commitish: ${{ github.sha }}
           body: |
             Windows build for **${{ github.ref_name }}**.
 
