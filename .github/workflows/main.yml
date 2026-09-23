@@ -60,6 +60,8 @@ jobs:
         uses: game-ci/unity-builder@v4
         env:
           UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
           PROJECT_VERSION: ${{ steps.ver.outputs.raw }}
           PROJECT_SHA: ${{ github.sha }}
         with:
