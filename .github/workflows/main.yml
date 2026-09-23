@@ -2,7 +2,7 @@ name: Build and Publish
 
 on:
   push:
-    branches: [build]
+    branches: [main]
     tags: ['v*']
   pull_request:
     branches: [main]
