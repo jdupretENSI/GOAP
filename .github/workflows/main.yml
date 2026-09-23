@@ -2,7 +2,10 @@ name: Build and Publish
 
 on:
   push:
+    branches: [build]
     tags: ['v*']
+  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       version:
@@ -22,7 +25,10 @@ concurrency:
 
 env:
   UNITY_VERSION: 6000.3.10f1
-  ITCH_TARGET: jdupretENSI/goap:windows
+  # Stable channel — used for tag pushes.
+  ITCH_TARGET_RELEASE: jdupretENSI/goap:windows
+  # Dev channel — used for branch pushes when the operator opts in.
+  ITCH_TARGET_DEV: jdupretENSI/goap:windows-dev
 
 jobs:
   # ------------------------------------------------------------------
@@ -36,6 +42,7 @@ jobs:
       version: ${{ steps.ver.outputs.clean }}
       raw_version: ${{ steps.ver.outputs.raw }}
       publish: ${{ steps.decide.outputs.publish }}
+      itch_target: ${{ steps.decide.outputs.target }}
 
     steps:
       - name: Checkout
@@ -53,6 +60,7 @@ jobs:
           BUTLER_API_KEY: ${{ secrets.BUTLER_API_KEY }}
           INPUT_PUSH: ${{ github.event.inputs.push_to_itch }}
           EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
         shell: bash
         run: |
           set -euo pipefail
@@ -80,7 +88,9 @@ jobs:
 
           # Butler is only needed when we actually publish.
           WILL_PUBLISH=false
-          if [ "$EVENT_NAME" = "push" ] || [ "${INPUT_PUSH:-false}" = "true" ]; then
+          if [ "$REF_TYPE" = "tag" ]; then
+            WILL_PUBLISH=true
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "${INPUT_PUSH:-false}" = "true" ]; then
             WILL_PUBLISH=true
           fi
           if [ "$WILL_PUBLISH" = "true" ]; then
@@ -135,15 +145,23 @@ jobs:
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
           INPUT_VERSION: ${{ github.event.inputs.version }}
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
 
-          if [ "$EVENT_NAME" = "push" ]; then
+          if [ "$REF_TYPE" = "tag" ]; then
+            # e.g. v0.3.1 -> 0.3.1
             RAW="$REF_NAME"
-          else
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             RAW="${INPUT_VERSION:-dev}"
+          else
+            # Branch push (build, PR, ...). Synthesize a unique dev version
+            # so successive pushes don't overwrite each other on the dev channel.
+            SHORT="${SHA:0:7}"
+            RAW="dev-${REF_NAME}-${SHORT}"
           fi
 
           CLEAN="${RAW#v}"
@@ -154,6 +172,7 @@ jobs:
             exit 1
           fi
 
+          # Allowed: letters, digits, '.', '_', '+', '-'. Must start alphanumeric.
           if ! printf '%s' "$CLEAN" | grep -Eq '^[0-9A-Za-z][0-9A-Za-z._+-]*$'; then
             echo "::error title=Invalid version::'$CLEAN' is not a usable version string. Allowed characters: letters, digits, '.', '_', '+', '-' (must start alphanumeric)."
             exit 1
@@ -163,33 +182,57 @@ jobs:
           echo "clean=$CLEAN" >> "$GITHUB_OUTPUT"
           echo "Resolved version: '$RAW' -> '$CLEAN'"
 
-      - name: Validate itch.io target
+      - name: Validate itch.io targets
         env:
-          ITCH_TARGET: ${{ env.ITCH_TARGET }}
+          RELEASE_TARGET: ${{ env.ITCH_TARGET_RELEASE }}
+          DEV_TARGET: ${{ env.ITCH_TARGET_DEV }}
         shell: bash
         run: |
           set -euo pipefail
-          if ! printf '%s' "$ITCH_TARGET" | grep -Eq '^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$'; then
-            echo "::error title=Invalid ITCH_TARGET::'$ITCH_TARGET' does not match 'user/game:channel'."
-            exit 1
-          fi
-          echo "OK: itch target '$ITCH_TARGET' is well formed."
+
+          validate_target() {
+            local label="$1" t="$2"
+            if ! printf '%s' "$t" | grep -Eq '^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$'; then
+              echo "::error title=Invalid $label::'$t' does not match 'user/game:channel'."
+              exit 1
+            fi
+            echo "OK: $label '$t' is well formed."
+          }
+
+          validate_target ITCH_TARGET_RELEASE "$RELEASE_TARGET"
+          validate_target ITCH_TARGET_DEV     "$DEV_TARGET"
 
       - name: Decide whether to publish
         id: decide
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
           INPUT_PUSH: ${{ github.event.inputs.push_to_itch }}
           VERSION: ${{ steps.ver.outputs.clean }}
+          RELEASE_TARGET: ${{ env.ITCH_TARGET_RELEASE }}
+          DEV_TARGET: ${{ env.ITCH_TARGET_DEV }}
         run: |
           set -euo pipefail
 
-          if [ "$EVENT_NAME" = "push" ]; then
+          PUBLISH=false
+          TARGET="$RELEASE_TARGET"
+
+          if [ "$REF_TYPE" = "tag" ]; then
+            # Tag pushes always publish to the release channel.
             PUBLISH=true
-          elif [ "${INPUT_PUSH:-false}" = "true" ]; then
+            TARGET="$RELEASE_TARGET"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "${INPUT_PUSH:-false}" = "true" ]; then
+            # Manual dispatch can publish; if the version looks like a real
+            # semver release (x.y.z) it goes to release, otherwise dev.
             PUBLISH=true
+            if printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
+              TARGET="$RELEASE_TARGET"
+            else
+              TARGET="$DEV_TARGET"
+            fi
           else
+            # Branch push / PR: build only. Never publish automatically.
             PUBLISH=false
           fi
 
@@ -198,28 +241,31 @@ jobs:
             exit 1
           fi
 
-          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
-          echo "Publish to itch.io: $PUBLISH"
+          echo "publish=$PUBLISH"   >> "$GITHUB_OUTPUT"
+          echo "target=$TARGET"     >> "$GITHUB_OUTPUT"
+          echo "Publish: $PUBLISH -> $TARGET"
 
       - name: Preflight summary
         env:
           EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
           RAW: ${{ steps.ver.outputs.raw }}
           CLEAN: ${{ steps.ver.outputs.clean }}
           PUBLISH: ${{ steps.decide.outputs.publish }}
+          TARGET: ${{ steps.decide.outputs.itch_target }}
           UNITY_VERSION: ${{ env.UNITY_VERSION }}
-          ITCH_TARGET: ${{ env.ITCH_TARGET }}
         run: |
           {
             echo "## Preflight OK"
             echo ""
             echo "| Setting | Value |"
             echo "| --- | --- |"
-            echo "| Trigger | \`$EVENT_NAME\` |"
+            echo "| Trigger | \`$EVENT_NAME\` (\`$REF_TYPE\` \`$REF_NAME\`) |"
             echo "| Raw version | \`$RAW\` |"
             echo "| Clean version | \`$CLEAN\` |"
             echo "| Unity version | \`$UNITY_VERSION\` |"
-            echo "| itch target | \`$ITCH_TARGET\` |"
+            echo "| itch target | \`$TARGET\` |"
             echo "| Will publish | \`$PUBLISH\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -301,6 +347,9 @@ jobs:
 
   # ------------------------------------------------------------------
   # 2. Push the build to itch.io.
+  #    - tag pushes             -> release channel (windows)
+  #    - manual + push_to_itch  -> release if semver, else dev channel
+  #    - branch pushes / PRs    -> never publish (artifact only)
   # ------------------------------------------------------------------
   publish:
     name: Publish to itch.io
@@ -340,6 +389,8 @@ jobs:
         env:
           BUTLER_API_KEY: ${{ secrets.BUTLER_API_KEY }}
           VERSION: ${{ needs.preflight.outputs.version }}
+          TARGET: ${{ needs.preflight.outputs.itch_target }}
         run: |
           set -euo pipefail
-          ./butler push build "${{ env.ITCH_TARGET }}" --userversion "$VERSION"
+          echo "Pushing build/ -> $TARGET @ $VERSION"
+          ./butler push build "$TARGET" --userversion "$VERSION" --ignore "build-info.txt"
