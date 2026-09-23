@@ -7,39 +7,39 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to build (e.g. 0.3.1). Defaults to "dev".'
+        description: 'Version override (e.g. 0.3.1). Leave empty to use the project version.'
         required: false
-        default: 'dev'
+        default: ''
       push_to_itch:
         description: 'Push to itch.io after build'
         required: false
         type: boolean
         default: true
 
-# Cancel superseded runs on the same ref instead of burning build minutes.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   UNITY_VERSION: 6000.3.10f1
-  # Public stable channel — used for main pushes, tag pushes, and manual
-  # publishes with a semver version.
   ITCH_TARGET_RELEASE: jdupretENSI/goap:windows
-  # Dev channel — only reachable via manual dispatch with a non-semver version.
   ITCH_TARGET_DEV: jdupretENSI/goap:windows-dev
 
 jobs:
   # ------------------------------------------------------------------
   # 0. Fail fast: verify every secret, tool and project precondition.
+  #    Also extracts the game name and version from the Unity project
+  #    so every downstream job uses a single source of truth.
   # ------------------------------------------------------------------
   preflight:
     name: Preflight checks
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
-      version: ${{ steps.ver.outputs.clean }}
-      raw_version: ${{ steps.ver.outputs.raw }}
+      version: ${{ steps.meta.outputs.version }}
+      raw_version: ${{ steps.meta.outputs.raw_version }}
+      game_name: ${{ steps.meta.outputs.game_name }}
+      game_key: ${{ steps.meta.outputs.game_key }}
       publish: ${{ steps.decide.outputs.publish }}
       itch_target: ${{ steps.decide.outputs.target }}
 
@@ -47,7 +47,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # No LFS needed for static validation; keeps preflight cheap.
           lfs: false
 
       - name: Validate required secrets
@@ -76,7 +75,6 @@ jobs:
             fi
           }
 
-          # Unity activation: either a .ulf license, or serial + credentials.
           if [ -n "${UNITY_LICENSE:-}" ]; then
             echo "OK: UNITY_LICENSE is set"
           else
@@ -86,10 +84,6 @@ jobs:
             require UNITY_PASSWORD "$UNITY_PASSWORD"
           fi
 
-          # Butler is needed whenever we publish. On this workflow that's:
-          #   - any tag push
-          #   - any push to main
-          #   - manual dispatch with push_to_itch (default true)
           WILL_PUBLISH=false
           if [ "$REF_TYPE" = "tag" ]; then
             WILL_PUBLISH=true
@@ -116,7 +110,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          for f in ProjectSettings/ProjectVersion.txt Packages/manifest.json Assets; do
+          for f in ProjectSettings/ProjectVersion.txt ProjectSettings/ProjectSettings.asset Packages/manifest.json Assets; do
             if [ ! -e "$f" ]; then
               echo "::error title=Missing project file::'$f' not found. Is the workflow running at the Unity project root?"
               exit 1
@@ -145,8 +139,8 @@ jobs:
           fi
           echo "OK: build entry point Goap.BuildTools.BuildRunner.BuildWindows found."
 
-      - name: Resolve and validate version
-        id: ver
+      - name: Extract game name and version from project
+        id: meta
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -154,25 +148,37 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           INPUT_VERSION: ${{ github.event.inputs.version }}
           SHA: ${{ github.sha }}
+          SETTINGS: ProjectSettings/ProjectSettings.asset
         run: |
           set -euo pipefail
           SHORT="${SHA:0:7}"
 
+          # ---- productName: the human-facing game title -------------------
+          GAME_NAME=$(sed -n 's/^  productName: *//p' "$SETTINGS" | tr -d '\r' | head -1)
+          # Strip optional surrounding quotes if Unity wrote any.
+          GAME_NAME="${GAME_NAME%\"}"
+          GAME_NAME="${GAME_NAME#\"}"
+
+          if [ -z "$GAME_NAME" ]; then
+            echo "::error title=Missing productName::Could not read 'productName' from $SETTINGS. Expected a line like '  productName: My Game'."
+            exit 1
+          fi
+
+          # ---- version ---------------------------------------------------
+          BUNDLE=$(sed -n 's/^  bundleVersion: *//p' "$SETTINGS" | tr -d '\r' | head -1)
+          BUNDLE="${BUNDLE%\"}"
+          BUNDLE="${BUNDLE#\"}"
+
+          if [ -z "$BUNDLE" ]; then
+            echo "::error title=Missing bundleVersion::Could not read 'bundleVersion' from $SETTINGS. Expected a line like '  bundleVersion: 0.3.1'."
+            exit 1
+          fi
+
           if [ "$REF_TYPE" = "tag" ]; then
-            # Tag push: authoritative. v0.3.1 -> 0.3.1
             RAW="$REF_NAME"
-          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            RAW="${INPUT_VERSION:-dev}"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "${INPUT_VERSION:-}" ]; then
+            RAW="$INPUT_VERSION"
           else
-            # Push to main. main is the shippable branch, so we don't want a
-            # "dev-..." version string on the public itch channel. Instead
-            # read bundleVersion from ProjectSettings.asset and append the
-            # commit short-SHA as semver build metadata.
-            BUNDLE=$(sed -n 's/^  bundleVersion: *//p' ProjectSettings/ProjectSettings.asset | tr -d '\r' | head -1)
-            if [ -z "$BUNDLE" ]; then
-              echo "::error title=Missing bundleVersion::Could not read bundleVersion from ProjectSettings/ProjectSettings.asset."
-              exit 1
-            fi
             RAW="${BUNDLE}+${SHORT}"
           fi
 
@@ -183,16 +189,34 @@ jobs:
             echo "::error title=Invalid version::Version resolved to an empty string (raw='$RAW')."
             exit 1
           fi
-
-          # Allowed: letters, digits, '.', '_', '+', '-'. Must start alphanumeric.
           if ! printf '%s' "$CLEAN" | grep -Eq '^[0-9A-Za-z][0-9A-Za-z._+-]*$'; then
-            echo "::error title=Invalid version::'$CLEAN' is not a usable version string. Allowed characters: letters, digits, '.', '_', '+', '-' (must start alphanumeric)."
+            echo "::error title=Invalid version::'$CLEAN' is not a usable version string (allowed: letters, digits, '.', '_', '+', '-'; must start alphanumeric)."
             exit 1
           fi
 
-          echo "raw=$RAW"     >> "$GITHUB_OUTPUT"
-          echo "clean=$CLEAN" >> "$GITHUB_OUTPUT"
-          echo "Resolved version: '$RAW' -> '$CLEAN'"
+          # ---- sanitized key: replace every char outside [A-Za-z0-9._-] --
+          #      with '-'. Case is preserved, consecutive illegal chars
+          #      become consecutive dashes (kept as-is so the transform is
+          #      a straight character-for-character substitution).
+          GAME_KEY=$(printf '%s' "$GAME_NAME" | sed -E 's/[^A-Za-z0-9._-]/-/g')
+
+          # Trim leading/trailing dashes and collapse repeats so we never
+          # end up with "Goap-" or "My--Game" as an identifier.
+          GAME_KEY=$(printf '%s' "$GAME_KEY" | sed -E 's/^-+//; s/-+$//; s/-{2,}/-/g')
+
+          if [ -z "$GAME_KEY" ]; then
+            echo "::error title=Empty game key::Could not derive a usable identifier from productName '$GAME_NAME'."
+            exit 1
+          fi
+
+          echo "game_name=$GAME_NAME"   >> "$GITHUB_OUTPUT"
+          echo "game_key=$GAME_KEY"     >> "$GITHUB_OUTPUT"
+          echo "raw_version=$RAW"       >> "$GITHUB_OUTPUT"
+          echo "version=$CLEAN"         >> "$GITHUB_OUTPUT"
+
+          echo "Game name (raw):       $GAME_NAME"
+          echo "Game key (sanitized):  $GAME_KEY"
+          echo "Version:               $RAW -> $CLEAN"
 
       - name: Validate itch.io targets
         env:
@@ -222,7 +246,7 @@ jobs:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
           INPUT_PUSH: ${{ github.event.inputs.push_to_itch }}
-          VERSION: ${{ steps.ver.outputs.clean }}
+          VERSION: ${{ steps.meta.outputs.version }}
           RELEASE_TARGET: ${{ env.ITCH_TARGET_RELEASE }}
           DEV_TARGET: ${{ env.ITCH_TARGET_DEV }}
         run: |
@@ -232,15 +256,12 @@ jobs:
           TARGET="$RELEASE_TARGET"
 
           if [ "$REF_TYPE" = "tag" ]; then
-            # Tag push: public release.
             PUBLISH=true
             TARGET="$RELEASE_TARGET"
           elif [ "$EVENT_NAME" = "push" ] && [ "$REF_NAME" = "main" ]; then
-            # Push to main: public release on the stable channel.
             PUBLISH=true
             TARGET="$RELEASE_TARGET"
           elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "${INPUT_PUSH:-true}" = "true" ]; then
-            # Manual: publish by default. Semver -> public, otherwise dev.
             PUBLISH=true
             if printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
               TARGET="$RELEASE_TARGET"
@@ -265,8 +286,10 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
-          RAW: ${{ steps.ver.outputs.raw }}
-          CLEAN: ${{ steps.ver.outputs.clean }}
+          GAME_NAME: ${{ steps.meta.outputs.game_name }}
+          GAME_KEY: ${{ steps.meta.outputs.game_key }}
+          RAW: ${{ steps.meta.outputs.raw_version }}
+          CLEAN: ${{ steps.meta.outputs.version }}
           PUBLISH: ${{ steps.decide.outputs.publish }}
           TARGET: ${{ steps.decide.outputs.itch_target }}
           UNITY_VERSION: ${{ env.UNITY_VERSION }}
@@ -277,6 +300,8 @@ jobs:
             echo "| Setting | Value |"
             echo "| --- | --- |"
             echo "| Trigger | \`$EVENT_NAME\` (\`$REF_TYPE\` \`$REF_NAME\`) |"
+            echo "| Game name | \`$GAME_NAME\` |"
+            echo "| Game key | \`$GAME_KEY\` |"
             echo "| Raw version | \`$RAW\` |"
             echo "| Clean version | \`$CLEAN\` |"
             echo "| Unity version | \`$UNITY_VERSION\` |"
@@ -288,7 +313,7 @@ jobs:
   # 1. Build the Windows player.
   # ------------------------------------------------------------------
   build:
-    name: Build Windows player
+    name: Build ${{ needs.preflight.outputs.game_name }}
     needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -356,15 +381,14 @@ jobs:
         id: zip
         shell: bash
         env:
+          GAME_KEY: ${{ needs.preflight.outputs.game_key }}
           VERSION: ${{ needs.preflight.outputs.version }}
         run: |
           set -euo pipefail
           DIR="${{ steps.locate.outputs.resolved }}"
-          # Sanitize '+' for a filename-safe zip name.
+          # Filename-safe: sanitize '+' (semver build metadata) to '_'.
           SAFE=$(printf '%s' "$VERSION" | tr '+' '_')
-          OUT="windows-${SAFE}.zip"
-          # Zip the *contents* of the build folder, so extracting the
-          # archive drops the .exe and _Data/ at the root, not nested.
+          OUT="${GAME_KEY}-windows-${SAFE}.zip"
           ( cd "$DIR" && zip -qr "$OLDPWD/$OUT" . )
           echo "zip=$OUT" >> "$GITHUB_OUTPUT"
           ls -lh "$OUT"
@@ -372,7 +396,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows-${{ needs.preflight.outputs.version }}
+          name: ${{ needs.preflight.outputs.game_key }}-windows-${{ needs.preflight.outputs.version }}
           path: |
             ${{ steps.locate.outputs.resolved }}
             ${{ steps.zip.outputs.zip }}
@@ -381,13 +405,9 @@ jobs:
 
   # ------------------------------------------------------------------
   # 2. Push the build to itch.io.
-  #    - tag pushes          -> :windows (public)
-  #    - main pushes         -> :windows (public)
-  #    - manual + push_to_itch (default true) -> :windows if semver,
-  #                                              :windows-dev otherwise
   # ------------------------------------------------------------------
   publish:
-    name: Publish to itch.io
+    name: Publish ${{ needs.preflight.outputs.game_name }} to itch.io
     needs: [preflight, build]
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -397,7 +417,7 @@ jobs:
       - name: Download build artifact
         uses: actions/download-artifact@v4
         with:
-          name: windows-${{ needs.preflight.outputs.version }}
+          name: ${{ needs.preflight.outputs.game_key }}-windows-${{ needs.preflight.outputs.version }}
           path: build
 
       - name: Verify downloaded artifact
@@ -405,7 +425,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$(ls -A build)" ]; then
-            echo "::error::Downloaded artifact 'windows-${{ needs.preflight.outputs.version }}' is empty."
+            echo "::error::Downloaded artifact is empty."
             exit 1
           fi
           echo "Artifact contents:"
@@ -425,23 +445,19 @@ jobs:
           BUTLER_API_KEY: ${{ secrets.BUTLER_API_KEY }}
           VERSION: ${{ needs.preflight.outputs.version }}
           TARGET: ${{ needs.preflight.outputs.itch_target }}
+          GAME_NAME: ${{ needs.preflight.outputs.game_name }}
         run: |
           set -euo pipefail
-          echo "Pushing build/ -> $TARGET @ $VERSION"
-          # The artifact contains both the unpacked folder and the zip.
-          # Exclude the zip so players don't see a redundant nested archive,
-          # and exclude build-info.txt so CI metadata isn't shipped.
+          echo "Pushing '$GAME_NAME' ($VERSION) -> $TARGET"
           ./butler push build "$TARGET" --userversion "$VERSION" \
             --ignore "*.zip" \
             --ignore "build-info.txt"
 
   # ------------------------------------------------------------------
   # 3. GitHub Release.
-  #    - main pushes -> synthetic tag "main-<sha7>", marked latest
-  #    - tag pushes  -> the tag itself, marked latest
   # ------------------------------------------------------------------
   release:
-    name: GitHub Release
+    name: GitHub Release — ${{ needs.preflight.outputs.game_name }}
     needs: [preflight, build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -455,7 +471,7 @@ jobs:
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: windows-${{ needs.preflight.outputs.version }}
+          name: ${{ needs.preflight.outputs.game_key }}-windows-${{ needs.preflight.outputs.version }}
           path: dist
 
       - name: Locate zip
@@ -463,9 +479,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ZIP=$(find dist -maxdepth 1 -name 'windows-*.zip' -print -quit)
+          ZIP=$(find dist -maxdepth 1 -name '*.zip' -print -quit)
           if [ -z "$ZIP" ]; then
-            echo "::error::No windows-*.zip found in downloaded artifact."
+            echo "::error::No *.zip found in downloaded artifact."
             exit 1
           fi
           echo "path=$ZIP"                >> "$GITHUB_OUTPUT"
@@ -479,22 +495,24 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           SHA: ${{ github.sha }}
           VERSION: ${{ needs.preflight.outputs.version }}
+          GAME_NAME: ${{ needs.preflight.outputs.game_name }}
+          GAME_KEY: ${{ needs.preflight.outputs.game_key }}
         run: |
           set -euo pipefail
           SHORT="${SHA:0:7}"
 
           if [ "$REF_TYPE" = "tag" ]; then
             TAG="$REF_NAME"
-            TITLE="Release $VERSION"
+            TITLE="${GAME_NAME} ${VERSION}"
           else
-            # main push — anchor the release to a synthetic tag.
-            TAG="main-${SHORT}"
-            TITLE="Build $VERSION"
+            TAG="${GAME_KEY}-main-${SHORT}"
+            TITLE="${GAME_NAME} ${VERSION}"
           fi
 
           echo "tag=$TAG"     >> "$GITHUB_OUTPUT"
           echo "title=$TITLE" >> "$GITHUB_OUTPUT"
-          echo "Release tag: $TAG"
+          echo "Release tag:   $TAG"
+          echo "Release title: $TITLE"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -503,7 +521,7 @@ jobs:
           name: ${{ steps.tag.outputs.title }}
           target_commitish: ${{ github.sha }}
           body: |
-            Windows build for **${{ github.ref_name }}**.
+            ${{ needs.preflight.outputs.game_name }} — Windows build.
 
             - Version: `${{ needs.preflight.outputs.version }}`
             - Commit: `${{ github.sha }}`
