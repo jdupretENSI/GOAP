@@ -1,0 +1,121 @@
+name: Build and Publish
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g. 0.3.1). Defaults to "dev".'
+        required: false
+        default: 'dev'
+      push_to_itch:
+        description: 'Push to itch.io after build'
+        required: false
+        default: 'false'
+
+env:
+  UNITY_VERSION: 6000.3.10f1
+  BUILD_ROOT: Build/Windows
+  ITCH_TARGET: jdupretENSI/goap:windows
+
+jobs:
+  # ------------------------------------------------------------------
+  # 1. Build the Windows player.
+  # ------------------------------------------------------------------
+  build:
+    name: Build Windows player
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Cache Library
+        uses: actions/cache@v4
+        with:
+          path: Library
+          key: Library-${{ env.UNITY_VERSION }}-${{ hashFiles('Packages/packages-lock.json', 'ProjectSettings/ProjectVersion.txt') }}
+          restore-keys: |
+            Library-${{ env.UNITY_VERSION }}-
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            RAW="${{ github.ref_name }}"
+          else
+            RAW="${{ github.event.inputs.version }}"
+          fi
+          CLEAN="${RAW#v}"
+          CLEAN="${CLEAN#V}"
+          echo "raw=$RAW"       >> "$GITHUB_OUTPUT"
+          echo "clean=$CLEAN"   >> "$GITHUB_OUTPUT"
+          echo "Version: $RAW -> $CLEAN"
+
+      - name: Build
+        uses: game-ci/unity-builder@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+          PROJECT_VERSION: ${{ steps.ver.outputs.raw }}
+          PROJECT_SHA: ${{ github.sha }}
+        with:
+          unityVersion: ${{ env.UNITY_VERSION }}
+          targetPlatform: StandaloneWindows64
+          projectPath: .
+          buildMethod: Goap.BuildTools.BuildRunner.BuildWindows
+          allowDirtyBuild: true
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ steps.ver.outputs.clean }}
+          path: ${{ env.BUILD_ROOT }}/${{ steps.ver.outputs.clean }}
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # 2. Push the build to itch.io.
+  # ------------------------------------------------------------------
+  publish:
+    name: Publish to itch.io
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event.inputs.push_to_itch == 'true'
+
+    steps:
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            RAW="${{ github.ref_name }}"
+          else
+            RAW="${{ github.event.inputs.version }}"
+          fi
+          CLEAN="${RAW#v}"
+          CLEAN="${CLEAN#V}"
+          echo "clean=$CLEAN" >> "$GITHUB_OUTPUT"
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-${{ steps.ver.outputs.clean }}
+          path: build
+
+      - name: Install butler
+        run: |
+          curl -L -o butler.zip https://broth.itch.zone/butler/linux-amd64/LATEST/archive/default
+          unzip butler.zip
+          chmod +x butler
+          ./butler -V
+
+      - name: Push to itch.io
+        env:
+          BUTLER_API_KEY: ${{ secrets.BUTLER_API_KEY }}
+        run: |
+          ./butler push build "${{ env.ITCH_TARGET }}" --userversion "${{ steps.ver.outputs.clean }}"
