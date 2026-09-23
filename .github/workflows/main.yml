@@ -62,45 +62,37 @@ jobs:
           UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
-          PROJECT_VERSION: ${{ steps.ver.outputs.raw }}
-          PROJECT_SHA: ${{ github.sha }}
         with:
           unityVersion: ${{ env.UNITY_VERSION }}
           targetPlatform: StandaloneWindows64
           projectPath: .
           buildMethod: Goap.BuildTools.BuildRunner.BuildWindows
           allowDirtyBuild: true
+          customParameters: >
+            -buildVersion "${{ steps.ver.outputs.clean }}"
+            -buildSha "${{ github.sha }}"
 
       - name: Locate build output
         id: locate
         shell: bash
         run: |
+          set -e
           echo "PWD: $(pwd)"
-          echo "--- top level ---"
-          ls -la
           echo "--- Build/ ---"
-          find Build -maxdepth 4 2>/dev/null || echo "no Build/"
-          echo "--- build/ ---"
-          find build -maxdepth 4 2>/dev/null || echo "no build/"
-          echo "--- unity-builder buildsPath output ---"
-          echo "${{ steps.build.outputs.buildsPath }}"
+          find Build -maxdepth 3 2>/dev/null || true
 
-          # Prefer the path unity-builder reports; fall back to our own
-          # convention (Build/Windows/<version>) if that path has no files.
-          CANDIDATE="${{ steps.build.outputs.buildsPath }}"
-          FALLBACK="Build/Windows/${{ steps.ver.outputs.clean }}"
+          INFO=$(find Build/Windows -maxdepth 2 -name build-info.txt -printf '%T@ %p\n' \
+                 | sort -nr | head -1 | cut -d' ' -f2-)
 
-          if [ -n "$CANDIDATE" ] && [ -d "$CANDIDATE" ] && [ -n "$(ls -A "$CANDIDATE" 2>/dev/null)" ]; then
-            RESOLVED="$CANDIDATE"
-          elif [ -d "$FALLBACK" ] && [ -n "$(ls -A "$FALLBACK" 2>/dev/null)" ]; then
-            RESOLVED="$FALLBACK"
-          else
-            echo "::error::No build output found. Tried '$CANDIDATE' and '$FALLBACK'."
+          if [ -z "$INFO" ]; then
+            echo "::error::No build-info.txt found under Build/Windows/."
             exit 1
           fi
 
-          echo "resolved=$RESOLVED" >> "$GITHUB_OUTPUT"
-          echo "Resolved artifact path: $RESOLVED"
+          DIR=$(dirname "$INFO")
+          echo "resolved=$DIR" >> "$GITHUB_OUTPUT"
+          echo "Resolved artifact path: $DIR"
+          cat "$INFO"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
