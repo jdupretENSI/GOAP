@@ -56,6 +56,8 @@ namespace Goap.BuildTools
         {
             if (BuildPlayerNow(out _) && Application.isBatchMode)
                 EditorApplication.Exit(0);
+            else if (Application.isBatchMode)
+                EditorApplication.Exit(1);
         }
 
         /// <summary>La build elle-même. Rend `false` si elle a échoué.</summary>
@@ -91,8 +93,10 @@ namespace Goap.BuildTools
             // Nom du dossier = version du jeu, sans SHA, sans "v".
             string folderName = BuildFolderName(version, stamped);
 
-            string root = Directory.GetCurrentDirectory();
-            outputDir = Path.Combine(root, OutputDir, folderName);
+            // Important: resolve to an absolute path so the workflow can find it
+            // regardless of the working directory unity-builder happens to use.
+            string root = Path.GetFullPath(Directory.GetCurrentDirectory());
+            outputDir = Path.GetFullPath(Path.Combine(root, OutputDir, folderName));
 
             // On ne supprime QUE le dossier de cette version, pas les autres.
             if (Directory.Exists(outputDir))
@@ -132,8 +136,10 @@ namespace Goap.BuildTools
                 return false;
             }
 
+            // Machine-readable line so CI can grep the exact output path if needed.
+            Debug.Log($"BUILD_OUTPUT_PATH={outputDir}");
             Debug.Log($"[{nameof(BuildRunner)}] Build OK : {summary.totalSize / (1024 * 1024)} Mo, "
-                      + $"version {stamped}, dans {Path.Combine(OutputDir, folderName)}");
+                      + $"version {stamped}, dans {outputDir}");
 
             return true;
         }
@@ -141,6 +147,7 @@ namespace Goap.BuildTools
         /// <summary>
         /// Nom du dossier de build.
         /// Priorité : PROJECT_VERSION → sinon version actuelle du projet → sinon "dev".
+        /// Toujours sans suffixe "+sha" et sans "v" initial.
         /// </summary>
         private static string BuildFolderName(string envVersion, string stampedVersion)
         {
