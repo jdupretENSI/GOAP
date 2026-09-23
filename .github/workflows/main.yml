@@ -14,7 +14,7 @@ on:
         description: 'Push to itch.io after build'
         required: false
         type: boolean
-        default: false
+        default: true
 
 # Cancel superseded runs on the same ref instead of burning build minutes.
 concurrency:
