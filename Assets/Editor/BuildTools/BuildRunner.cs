@@ -5,6 +5,7 @@ using System.Linq;
 using UnityEditor;
 using UnityEditor.Build.Reporting;
 using UnityEngine;
+// Resolves CS0104: both UnityEngine and System.Diagnostics define Debug.
 using Debug = UnityEngine.Debug;
 
 namespace Goap.BuildTools
@@ -104,8 +105,6 @@ namespace Goap.BuildTools
             outputDir = null;
 
             // 1. S'assurer que la cible active correspond à ce qu'on construit.
-            //    Sinon BuildPipeline.BuildPlayer échoue avec un message obscur
-            //    (surtout en local, quand l'éditeur est resté sur une autre plateforme).
             if (EditorUserBuildSettings.activeBuildTarget != BuildTarget.StandaloneWindows64)
             {
                 Debug.Log($"[{nameof(BuildRunner)}] Bascule vers StandaloneWindows64...");
@@ -142,13 +141,11 @@ namespace Goap.BuildTools
                 return false;
             }
 
-            // Nom du dossier = version du jeu, sans SHA, sans "v".
             string folderName = BuildFolderName(version, stamped);
 
             string root = Path.GetFullPath(Directory.GetCurrentDirectory());
             outputDir = Path.GetFullPath(Path.Combine(root, OutputDir, folderName));
 
-            // On ne supprime QUE le dossier de cette version, pas les autres.
             if (Directory.Exists(outputDir))
             {
                 try
@@ -163,8 +160,6 @@ namespace Goap.BuildTools
             }
             Directory.CreateDirectory(outputDir);
 
-            // Nom d'exécutable assaini : Unity échoue si ProductName contient
-            // un caractère invalide pour un nom de fichier.
             string exeName = SanitizeFileName(Application.productName);
             if (string.IsNullOrEmpty(exeName))
                 exeName = "Game";
@@ -175,8 +170,6 @@ namespace Goap.BuildTools
                 locationPathName = Path.Combine(outputDir, $"{exeName}.exe"),
                 target = BuildTarget.StandaloneWindows64,
                 targetGroup = BuildTargetGroup.Standalone,
-                // Pour une build de release, on peut passer à BuildOptions.StrictMode
-                // (mais cela fait échouer la build sur de simples warnings).
                 options = BuildOptions.None,
             };
 
@@ -205,9 +198,9 @@ namespace Goap.BuildTools
                 return false;
             }
 
-            // Marqueur lisible par la CI. Son emplacement (Build/Windows/<version>/build-info.txt)
-            // doit rester compatible avec le `find Build/Windows -maxdepth 2 -name build-info.txt`
-            // du workflow. Il est exclu de l'upload itch via --ignore dans upload-itchio.ps1.
+            // Marqueur lisible par la CI. Emplacement compatible avec le
+            // `find Build/Windows -maxdepth 2 -name build-info.txt` du workflow.
+            // Exclu de l'upload itch via --ignore.
             try
             {
                 File.WriteAllText(
@@ -216,7 +209,6 @@ namespace Goap.BuildTools
             }
             catch (Exception e)
             {
-                // Ne pas tuer une build réussie pour un fichier de métadonnées.
                 Debug.LogWarning($"[{nameof(BuildRunner)}] Écriture de build-info.txt ignorée : {e.Message}");
             }
 
@@ -231,27 +223,18 @@ namespace Goap.BuildTools
         // Helpers
         // ------------------------------------------------------------------
 
-        /// <summary>
-        /// Version effective : argument CLI `-buildVersion` (via game-ci) sinon
-        /// variable d'environnement <see cref="VersionVariable"/> (usage local).
-        /// </summary>
         private static string ResolveVersion()
         {
             return GetArgValue(VersionArg)
                    ?? Environment.GetEnvironmentVariable(VersionVariable);
         }
 
-        /// <summary>SHA effectif : argument CLI `-buildSha` sinon <see cref="ShaVariable"/>.</summary>
         private static string ResolveSha()
         {
             return GetArgValue(ShaArg)
                    ?? Environment.GetEnvironmentVariable(ShaVariable);
         }
 
-        /// <summary>
-        /// Récupère la valeur d'un argument CLI de la forme `-name value`.
-        /// Renvoie null si l'argument est absent ou sans valeur.
-        /// </summary>
         private static string GetArgValue(string name)
         {
             string[] args = Environment.GetCommandLineArgs();
@@ -266,11 +249,6 @@ namespace Goap.BuildTools
             return null;
         }
 
-        /// <summary>
-        /// Nom du dossier de build.
-        /// Priorité : PROJECT_VERSION → sinon version actuelle du projet → sinon "dev".
-        /// Toujours sans suffixe "+sha" et sans "v" initial.
-        /// </summary>
         private static string BuildFolderName(string envVersion, string stampedVersion)
         {
             string baseName;
@@ -282,7 +260,6 @@ namespace Goap.BuildTools
             else
                 baseName = "dev";
 
-            // Retire un éventuel suffixe "+sha" pour garder un nom de dossier propre.
             int plus = baseName.IndexOf('+');
             if (plus > 0)
                 baseName = baseName.Substring(0, plus);
