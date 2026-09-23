@@ -18,6 +18,12 @@ namespace Goap.BuildTools
         /// <summary>Le commit livré, ajouté à la version pour que les journaux se rattachent au dépôt.</summary>
         private const string ShaVariable = "PROJECT_SHA";
 
+        /// <summary>Argument CLI équivalent à <see cref="VersionVariable"/> (utilisé via game-ci/unity-builder).</summary>
+        private const string VersionArg = "-buildVersion";
+
+        /// <summary>Argument CLI équivalent à <see cref="ShaVariable"/>.</summary>
+        private const string ShaArg = "-buildSha";
+
         [MenuItem("Tools/Build and Publish on itchio")]
         public static void BuildAndPublish()
         {
@@ -33,7 +39,7 @@ namespace Goap.BuildTools
                 return;
             }
 
-            string version = Environment.GetEnvironmentVariable(VersionVariable);
+            string version = ResolveVersion();
             string versionArg = string.IsNullOrWhiteSpace(version)
                 ? string.Empty
                 : $" -Version \"{NormalizeVersion(version)}\"";
@@ -66,8 +72,8 @@ namespace Goap.BuildTools
             outputDir = null;
 
             string previousVersion = PlayerSettings.bundleVersion;
-            string version = Environment.GetEnvironmentVariable(VersionVariable);
-            string sha = Environment.GetEnvironmentVariable(ShaVariable);
+            string version = ResolveVersion();
+            string sha = ResolveSha();
 
             string stamped = previousVersion;
             if (!string.IsNullOrWhiteSpace(version))
@@ -93,8 +99,6 @@ namespace Goap.BuildTools
             // Nom du dossier = version du jeu, sans SHA, sans "v".
             string folderName = BuildFolderName(version, stamped);
 
-            // Important: resolve to an absolute path so the workflow can find it
-            // regardless of the working directory unity-builder happens to use.
             string root = Path.GetFullPath(Directory.GetCurrentDirectory());
             outputDir = Path.GetFullPath(Path.Combine(root, OutputDir, folderName));
 
@@ -136,12 +140,52 @@ namespace Goap.BuildTools
                 return false;
             }
 
-            // Machine-readable line so CI can grep the exact output path if needed.
+            // Marqueur lisible par la CI, au cas où le nom de dossier diffère de ce que
+            // le workflow attend (ex. PROJECT_VERSION absent côté workflow).
+            File.WriteAllText(
+                Path.Combine(outputDir, "build-info.txt"),
+                $"folder={folderName}\nversion={stamped}\npath={outputDir}\n");
+
             Debug.Log($"BUILD_OUTPUT_PATH={outputDir}");
             Debug.Log($"[{nameof(BuildRunner)}] Build OK : {summary.totalSize / (1024 * 1024)} Mo, "
                       + $"version {stamped}, dans {outputDir}");
 
             return true;
+        }
+
+        /// <summary>
+        /// Version effective : argument CLI `-buildVersion` (via game-ci) sinon
+        /// variable d'environnement <see cref="VersionVariable"/> (usage local).
+        /// </summary>
+        private static string ResolveVersion()
+        {
+            return GetArgValue(VersionArg)
+                   ?? Environment.GetEnvironmentVariable(VersionVariable);
+        }
+
+        /// <summary>SHA effectif : argument CLI `-buildSha` sinon <see cref="ShaVariable"/>.</summary>
+        private static string ResolveSha()
+        {
+            return GetArgValue(ShaArg)
+                   ?? Environment.GetEnvironmentVariable(ShaVariable);
+        }
+
+        /// <summary>
+        /// Récupère la valeur d'un argument CLI de la forme `-name value`.
+        /// Renvoie null si l'argument est absent ou sans valeur.
+        /// </summary>
+        private static string GetArgValue(string name)
+        {
+            string[] args = Environment.GetCommandLineArgs();
+            for (int i = 0; i < args.Length - 1; i++)
+            {
+                if (string.Equals(args[i], name, StringComparison.OrdinalIgnoreCase))
+                {
+                    string value = args[i + 1];
+                    return string.IsNullOrWhiteSpace(value) ? null : value;
+                }
+            }
+            return null;
         }
 
         /// <summary>
